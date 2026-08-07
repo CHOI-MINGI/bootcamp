@@ -1,0 +1,27 @@
+# 환경변수 (API 키) — 절대 커밋 금지
+.env
+
+# 가상환경
+venv/
+.venv/
+
+# 저장된 자료 (인덱스 · 원본 PDF · 목록)
+data/
+
+# 임시 업로드 파일
+temp_*
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+_desktop.ini
+
+# IDE
+.vscode/
+.idea/
