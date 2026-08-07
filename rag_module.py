@@ -102,10 +102,14 @@ def create_rag_chain():
 def is_allowed(metadata, role, courses):
     """이 청크를 해당 사용자가 볼 수 있는지 판단한다.
 
+    - 관리자는 모든 자료를 볼 수 있다.
     - 공개 자료는 누구나 볼 수 있다.
     - 그 외에는 본인 과목(수강 또는 담당)이어야 한다.
     - 교수자 전용 자료는 교수자만 볼 수 있다.
     """
+    if role == "관리자":
+        return True
+
     visibility = metadata.get("visibility", "공개")
     course_id = metadata.get("course_id", "공통")
 

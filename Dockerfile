@@ -18,14 +18,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# 윈도우에서 만든 파일은 줄 끝에 \r이 붙어 리눅스에서 실행되지 않는다. 제거한다.
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
+
 # Cloud Run은 PORT 환경변수로 사용할 포트를 알려준다. 그 값을 그대로 써야 한다.
 ENV PORT=8080
 EXPOSE 8080
 
-# --server.address=0.0.0.0 : 컨테이너 밖에서 접속할 수 있게 한다.
-# --server.headless=true   : 실행 시 브라우저를 열려고 시도하지 않는다.
-CMD streamlit run app.py \
-    --server.port=$PORT \
-    --server.address=0.0.0.0 \
-    --server.headless=true \
-    --browser.gatherUsageStats=false
+# 시작 스크립트가 구글 로그인 설정을 만든 뒤 streamlit을 실행한다.
+CMD ["./entrypoint.sh"]

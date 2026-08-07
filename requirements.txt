@@ -1,4 +1,5 @@
-streamlit                # 웹 UI
+streamlit>=1.42          # 웹 UI (구글 로그인 기능 포함 버전)
+Authlib>=1.3.2           # Streamlit 구글 로그인에 필요
 python-dotenv            # .env에서 API 키 읽기
 
 langchain-core           # 프롬프트 · 체인 · 출력 파서

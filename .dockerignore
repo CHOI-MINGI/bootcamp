@@ -1,6 +1,7 @@
 # 컨테이너에 넣지 않을 것들
 # .env가 이미지에 들어가면 키가 이미지 안에 박제된다. 반드시 제외한다.
 .env
+.streamlit/secrets.toml
 
 venv/
 .venv/

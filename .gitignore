@@ -1,6 +1,9 @@
 # 환경변수 (API 키) — 절대 커밋 금지
 .env
 
+# 구글 로그인 설정 (클라이언트 시크릿 포함) — 절대 커밋 금지
+.streamlit/secrets.toml
+
 # 가상환경
 venv/
 .venv/

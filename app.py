@@ -15,6 +15,7 @@ except Exception:
     pass
 
 import ui
+import auth
 import storage
 import logger
 from rag_module import (load_documents, add_documents, create_rag_chain,
@@ -30,51 +31,11 @@ ui.inject_css()
 
 
 # ============================================================
-# 0. 로그인 (3주차에 학내 SSO로 대체 예정)
+# 0. 로그인
 # ============================================================
-def login_screen():
-    left, center, right = st.columns([1, 1.4, 1])
-
-    with center:
-        ui.hero(
-            "OO UNIVERSITY",
-            "AI 학습 도우미",
-            "학내 자료를 근거로 답하는 교수·학습 지원 서비스",
-        )
-
-        with st.form("login"):
-            user_id = st.text_input("아이디", placeholder="학번 또는 교번")
-            role = st.radio("구분", ["학습자", "교수자"], horizontal=True)
-            courses = st.text_input(
-                "수강(담당) 과목 코드",
-                placeholder="예: EE201, EE305",
-                help="쉼표로 구분해 입력하세요. 실제 서비스에서는 학사 시스템에서 자동으로 가져옵니다.",
-            )
-            submitted = st.form_submit_button("로그인", use_container_width=True)
-
-        if submitted:
-            if not user_id.strip():
-                st.error("아이디를 입력해 주세요.")
-            else:
-                st.session_state.user_id = user_id.strip()
-                st.session_state.role = role
-                st.session_state.courses = [
-                    c.strip() for c in courses.split(",") if c.strip()
-                ]
-                st.rerun()
-
-        st.markdown(
-            '<div class="login-note">'
-            '프로토타입 단계이므로 비밀번호 확인은 생략했습니다.<br>'
-            '실제 서비스에서는 학내 SSO(OAuth2)로 로그인하고, 수강 과목은 학사 시스템과 연동됩니다.'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-
-if "user_id" not in st.session_state:
-    login_screen()
-    st.stop()
+# 로그인하지 않았으면 여기서 실행이 멈춘다.
+# 역할과 과목은 사용자가 고르는 것이 아니라 계정 정보로 서버가 정한다.
+auth.require_login()
 
 
 # 세션 상태 초기화
@@ -95,6 +56,12 @@ if "rag_chain" not in st.session_state:
 ROLE = st.session_state.role
 COURSES = st.session_state.courses
 
+# 관리자는 교수자·학습자 화면을 모두 쓸 수 있다.
+# 어느 화면을 볼지는 사이드바에서 고른다. 자료 접근 권한은 관리자 그대로 유지된다.
+VIEW = ROLE
+if ROLE == "관리자":
+    VIEW = st.session_state.get("admin_view", "교수자")
+
 
 # ============================================================
 # 1. 사이드바 : 사용자 정보 + 자료 등록
@@ -102,9 +69,14 @@ COURSES = st.session_state.courses
 with st.sidebar:
     ui.user_card(st.session_state.user_id, ROLE, COURSES)
 
+    if ROLE == "관리자":
+        st.radio("화면 보기", ["교수자", "학습자"], key="admin_view",
+                 horizontal=True,
+                 help="관리자는 두 화면을 모두 볼 수 있습니다. "
+                      "자료 접근 권한은 관리자 기준으로 유지됩니다.")
+
     if st.button("로그아웃", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
+        auth.logout()
 
     st.divider()
     st.header("자료 등록")
@@ -115,8 +87,8 @@ with st.sidebar:
     course_id = st.text_input("과목 코드", value="공통",
                               help="'공통'으로 두면 전교 공개 자료가 됩니다.")
 
-    # 교수자만 비공개 자료를 올릴 수 있다.
-    if ROLE == "교수자":
+    # 교수자와 관리자만 비공개 자료를 올릴 수 있다.
+    if ROLE in ("교수자", "관리자"):
         visibility = st.selectbox("공개 범위", ["공개", "수강생", "교수자"])
     else:
         visibility = "공개"
@@ -181,8 +153,8 @@ with st.sidebar:
             ui.doc_item(item["file"], item["course"],
                         item["visibility"], item["chunks"])
 
-            # 교수자만 자료를 지울 수 있다.
-            if ROLE == "교수자":
+            # 교수자와 관리자만 자료를 지울 수 있다.
+            if ROLE in ("교수자", "관리자"):
                 if st.button("삭제", key=f"del_{item['file']}",
                              use_container_width=True):
                     with st.spinner(f"{item['file']} 삭제 후 인덱스를 다시 만드는 중..."):
@@ -460,7 +432,7 @@ def dashboard_tab():
         st.rerun()
 
 
-if ROLE == "교수자":
+if VIEW == "교수자":
     tabs = st.tabs(["질의응답", "문항 생성", "강의계획서", "핵심 요약",
                     "강의 슬라이드", "이용 현황"])
 
