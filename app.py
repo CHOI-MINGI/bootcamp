@@ -21,7 +21,8 @@ import storage
 import logger
 import loaders
 from rag_module import (load_documents, add_documents, create_rag_chain,
-                        ask, generate, TASK_PROMPTS, SIMILARITY_THRESHOLD)
+                        ask, generate, friendly_error,
+                        TASK_PROMPTS, SIMILARITY_THRESHOLD)
 from slides import generate_slide_data, build_pptx
 
 st.set_page_config(
@@ -81,6 +82,24 @@ with st.sidebar:
         auth.logout()
 
     st.divider()
+
+    # 자료 목록은 세션이 시작될 때 한 번만 읽는다.
+    # 접속 중에 다른 사람이 자료를 등록하면 이 버튼으로 다시 불러온다.
+    if st.button("자료 새로고침", use_container_width=True):
+        with st.spinner("자료를 다시 불러오는 중..."):
+            vs, library, pdf_store = storage.load_all()
+        st.session_state.vectorstore = vs
+        st.session_state.library = library
+        st.session_state.pdf_store = pdf_store
+        st.rerun()
+
+
+# 자료 등록은 교수자와 관리자만 한다.
+# 학내 자료를 관리하는 주체가 학습자가 아니기 때문이다.
+CAN_MANAGE = ROLE in ("교수자", "관리자")
+
+
+def upload_panel():
     st.header("자료 등록")
 
     uploaded_files = st.file_uploader(
@@ -92,13 +111,7 @@ with st.sidebar:
     )
     course_id = st.text_input("과목 코드", value="공통",
                               help="'공통'으로 두면 전교 공개 자료가 됩니다.")
-
-    # 교수자와 관리자만 비공개 자료를 올릴 수 있다.
-    if ROLE in ("교수자", "관리자"):
-        visibility = st.selectbox("공개 범위", ["공개", "수강생", "교수자"])
-    else:
-        visibility = "공개"
-        st.caption("학습자는 공개 자료만 등록할 수 있습니다.")
+    visibility = st.selectbox("공개 범위", ["공개", "수강생", "교수자"])
 
     if st.button("자료 등록", type="primary", use_container_width=True,
                  disabled=not uploaded_files):
@@ -149,30 +162,41 @@ with st.sidebar:
                          st.session_state.library,
                          st.session_state.pdf_store)
 
-    # 등록된 자료 목록
-    if st.session_state.library:
-        st.divider()
-        st.caption(f"등록된 자료 {len(st.session_state.library)}건")
 
-        for item in st.session_state.library:
-            ui.doc_item(item["file"], item["course"],
-                        item["visibility"], item["chunks"])
+def library_panel():
+    """등록된 자료 목록. 학습자에게도 어떤 자료가 있는지 보여준다."""
+    if not st.session_state.library:
+        return
 
-            # 교수자와 관리자만 자료를 지울 수 있다.
-            if ROLE in ("교수자", "관리자"):
-                if st.button("삭제", key=f"del_{item['file']}",
-                             use_container_width=True):
-                    with st.spinner(f"{item['file']} 삭제 중..."):
-                        vs, library, pdf_store = storage.delete_document(
-                            st.session_state.vectorstore,
-                            item["file"],
-                            st.session_state.library,
-                            st.session_state.pdf_store,
-                        )
-                    st.session_state.vectorstore = vs
-                    st.session_state.library = library
-                    st.session_state.pdf_store = pdf_store
-                    st.rerun()
+    st.divider()
+    st.caption(f"등록된 자료 {len(st.session_state.library)}건")
+
+    for item in st.session_state.library:
+        ui.doc_item(item["file"], item["course"],
+                    item["visibility"], item["chunks"])
+
+        if CAN_MANAGE and st.button("삭제", key=f"del_{item['file']}",
+                                    use_container_width=True):
+            with st.spinner(f"{item['file']} 삭제 중..."):
+                vs, library, pdf_store = storage.delete_document(
+                    st.session_state.vectorstore,
+                    item["file"],
+                    st.session_state.library,
+                    st.session_state.pdf_store,
+                )
+            st.session_state.vectorstore = vs
+            st.session_state.library = library
+            st.session_state.pdf_store = pdf_store
+            st.rerun()
+
+
+with st.sidebar:
+    if CAN_MANAGE:
+        upload_panel()
+    else:
+        st.caption("자료 등록은 교수자와 관리자가 담당합니다.")
+
+    library_panel()
 
 
 # ============================================================
@@ -185,7 +209,12 @@ ui.hero(
 )
 
 if st.session_state.vectorstore is None:
-    st.info("왼쪽 사이드바에서 PDF 자료를 등록하면 시작됩니다.")
+    if CAN_MANAGE:
+        st.info("왼쪽 사이드바에서 자료를 등록하면 시작됩니다.")
+    else:
+        st.info("아직 등록된 자료가 없습니다. "
+                "교수자가 자료를 등록하면 질문할 수 있습니다.")
+        st.caption("자료가 방금 등록되었다면 왼쪽의 **자료 새로고침**을 눌러 주세요.")
     st.stop()
 
 
@@ -233,14 +262,21 @@ def chat_tab():
         with st.chat_message("assistant"):
             with st.spinner("답변 생성 중..."):
                 started = time.time()
-                result = ask(
-                    st.session_state.vectorstore,
-                    st.session_state.rag_chain,
-                    prompt,
-                    role=ROLE,
-                    courses=COURSES,
-                    history=history,
-                )
+                try:
+                    result = ask(
+                        st.session_state.vectorstore,
+                        st.session_state.rag_chain,
+                        prompt,
+                        role=ROLE,
+                        courses=COURSES,
+                        history=history,
+                    )
+                except Exception as e:
+                    # 예상하지 못한 오류도 화면에 그대로 노출하지 않는다.
+                    result = {"answer": friendly_error(e), "sources": [],
+                              "blocked": True, "reason": type(e).__name__,
+                              "best_score": None, "failed": True}
+
                 logger.log(st.session_state.user_id, ROLE, "질의응답",
                            prompt, result, time.time() - started)
 
@@ -249,7 +285,9 @@ def chat_tab():
                 st.caption(f"이전 대화를 반영해 다음으로 검색했습니다 — "
                            f"「{result['rewritten']}」")
 
-            if result["blocked"]:
+            if result.get("failed"):
+                response = f"⚠️ {result['answer']}"
+            elif result["blocked"]:
                 response = f"⚠️ {result['answer']}"
             else:
                 response = result["answer"]
@@ -354,11 +392,18 @@ def run_generation(task, spinner_text, extra="", template=None, **params):
 
     with st.spinner(spinner_text):
         started = time.time()
-        result = generate(
-            st.session_state.vectorstore, task,
-            role=ROLE, courses=COURSES,
-            extra=extra, template=template, **params
-        )
+        try:
+            result = generate(
+                st.session_state.vectorstore, task,
+                role=ROLE, courses=COURSES,
+                extra=extra, template=template, **params
+            )
+        except Exception as e:
+            # 예상하지 못한 오류도 화면에 그대로 노출하지 않는다.
+            result = {"answer": friendly_error(e), "sources": [],
+                      "blocked": True, "reason": str(type(e).__name__),
+                      "best_score": None, "failed": True}
+
         logger.log(st.session_state.user_id, ROLE,
                    FEATURE_NAMES.get(task, task),
                    params.get("topic", ""), result, time.time() - started)
@@ -573,10 +618,17 @@ if VIEW == "교수자":
             else:
                 with st.spinner("슬라이드를 구성하는 중입니다..."):
                     started = time.time()
-                    result = generate_slide_data(
-                        st.session_state.vectorstore, topic, count,
-                        role=ROLE, courses=COURSES, extra=extra,
-                    )
+                    try:
+                        result = generate_slide_data(
+                            st.session_state.vectorstore, topic, count,
+                            role=ROLE, courses=COURSES, extra=extra,
+                        )
+                    except Exception as e:
+                        result = {"answer": friendly_error(e), "slides": None,
+                                  "sources": [], "blocked": True,
+                                  "reason": type(e).__name__,
+                                  "best_score": None, "failed": True}
+
                     logger.log(st.session_state.user_id, ROLE, "강의 슬라이드",
                                topic, result, time.time() - started)
 

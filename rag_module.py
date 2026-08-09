@@ -19,8 +19,44 @@ REFUSAL_MESSAGE = "제공된 자료에서 해당 내용을 찾을 수 없습니�
 # 먼저 넉넉히 가져온 뒤 걸러내고 상위 k개만 사용한다.
 FETCH_K = 30
 
-EMBEDDING_MODEL = "models/gemini-embedding-001"
-CHAT_MODEL = "gemini-3.6-flash"
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-3.6-flash")
+
+
+# ------------------------------------------------------------
+# 모델 호출 오류 처리
+# ------------------------------------------------------------
+# 할당량 초과나 일시적 장애가 사용자에게 스택트레이스로 보이면 안 된다.
+# 무엇이 잘못됐는지 알 수 있는 짧은 문장으로 바꿔 돌려준다.
+def friendly_error(e):
+    message = str(e)
+
+    if "429" in message or "RESOURCE_EXHAUSTED" in message:
+        if "PerDay" in message or "free_tier" in message:
+            return ("오늘 사용 가능한 무료 호출 한도를 모두 사용했습니다. "
+                    "내일 다시 이용하시거나 관리자에게 문의해 주세요.")
+        return "요청이 잠시 몰렸습니다. 30초쯤 뒤에 다시 시도해 주세요."
+
+    if "401" in message or "API key" in message or "PERMISSION_DENIED" in message:
+        return "모델 인증에 실패했습니다. 관리자에게 문의해 주세요."
+
+    if "404" in message or "not found" in message:
+        return "설정된 모델을 사용할 수 없습니다. 관리자에게 문의해 주세요."
+
+    return "답변을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요."
+
+
+def _failed(e):
+    """모델 호출 실패를 다른 응답과 같은 형태로 돌려준다."""
+    return {
+        "answer": friendly_error(e),
+        "sources": [],
+        "blocked": True,
+        "reason": f"모델 호출 실패: {type(e).__name__}",
+        "best_score": None,
+        "rewritten": None,
+        "failed": True,
+    }
 
 
 # ============================================================
@@ -215,9 +251,15 @@ REWRITE_TEMPLATE = """이전 대화를 참고해, 아래 질문을 그 문장만
 
 # 이런 표현이 있으면 앞 대화를 가리키는 질문일 가능성이 높다.
 FOLLOWUP_MARKERS = [
+    # 지시어
     "그거", "그것", "저거", "저것", "이거", "이것", "그건", "이건", "저건",
-    "그 부분", "이 부분", "위에", "아까", "방금", "앞에서",
-    "그럼", "그러면", "더 자세히", "자세히 설명", "예를 들", "왜 그",
+    "그 부분", "이 부분", "그중", "그 중",
+    # 앞 대화를 가리키는 표현
+    "위에", "아까", "방금", "앞에서", "앞서", "먼저", "이전에",
+    "말했던", "말한", "설명했던", "설명한", "언급한", "언급했던",
+    # 이어지는 요청
+    "그럼", "그러면", "더 자세히", "자세히 설명", "더 설명", "추가로",
+    "예를 들", "왜 그", "다시 설명",
 ]
 
 
@@ -290,10 +332,13 @@ def ask(vectorstore, rag_chain, question, role="학습자", courses=(), k=3,
         return blocked
 
     # 답변 생성에는 원래 질문을 쓴다. 재작성은 검색을 위한 것이기 때문이다.
-    answer = rag_chain.invoke({
-        "context": _build_context(docs),
-        "question": search_query if rewritten else question,
-    })
+    try:
+        answer = rag_chain.invoke({
+            "context": _build_context(docs),
+            "question": search_query if rewritten else question,
+        })
+    except Exception as e:
+        return _failed(e)
 
     return {
         "answer": answer,
@@ -390,11 +435,14 @@ def generate(vectorstore, task, role="학습자", courses=(), k=5,
     llm = ChatGoogleGenerativeAI(model=CHAT_MODEL, temperature=0.3)
     chain = prompt | llm | StrOutputParser()
 
-    answer = chain.invoke({
-        "instruction": instruction,
-        "extra": _format_extra(extra),
-        "context": _build_context(docs),
-    })
+    try:
+        answer = chain.invoke({
+            "instruction": instruction,
+            "extra": _format_extra(extra),
+            "context": _build_context(docs),
+        })
+    except Exception as e:
+        return _failed(e)
 
     return {
         "answer": answer,

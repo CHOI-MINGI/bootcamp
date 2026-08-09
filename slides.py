@@ -25,7 +25,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from rag_module import (_search, _build_context, _build_sources,
-                        _format_extra, CHAT_MODEL)
+                        _format_extra, _failed, CHAT_MODEL)
 
 
 # ============================================================
@@ -121,12 +121,17 @@ def generate_slide_data(vectorstore, topic, count=5, role="교수자", courses=(
     llm = ChatGoogleGenerativeAI(model=CHAT_MODEL, temperature=0.2)
     chain = prompt | llm | StrOutputParser()
 
-    raw = chain.invoke({
-        "topic": topic,
-        "count": count,
-        "extra": _format_extra(extra),
-        "context": _build_context(docs),
-    })
+    try:
+        raw = chain.invoke({
+            "topic": topic,
+            "count": count,
+            "extra": _format_extra(extra),
+            "context": _build_context(docs),
+        })
+    except Exception as e:
+        result = _failed(e)
+        result["slides"] = None
+        return result
 
     try:
         slides = _parse_json(raw)
