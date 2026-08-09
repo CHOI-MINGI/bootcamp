@@ -155,8 +155,11 @@ def generate_slide_data(vectorstore, topic, count=5, role="교수자", courses=(
 # 3. 근거 페이지에서 그림 가져오기
 # ============================================================
 def _parse_source(source):
-    """'회로이론.pdf p.12' 형태에서 파일명과 페이지 번호를 분리한다."""
-    m = re.search(r"^(.*?)\s*p\.\s*(\d+)", source)
+    """'회로이론.pdf p.12' 형태에서 파일명과 페이지 번호를 분리한다.
+
+    도표를 꺼낼 수 있는 것은 PDF뿐이므로 다른 형식은 처리하지 않는다.
+    """
+    m = re.search(r"^(.*?\.pdf)\s*p\.\s*(\d+)", source, re.IGNORECASE)
     if not m:
         return None, None
     return m.group(1).strip(), int(m.group(2))

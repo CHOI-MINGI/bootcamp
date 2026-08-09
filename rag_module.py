@@ -1,11 +1,12 @@
 import os
 from dotenv import load_dotenv
-from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+
+import loaders
 
 # .env 파일에 저장된 API 키 로드
 load_dotenv()
@@ -26,13 +27,14 @@ CHAT_MODEL = "gemini-3.6-flash"
 # 1. 문서 적재 및 인덱싱
 # ============================================================
 def load_documents(pdf_path, display_name, course_id="공통", visibility="공개"):
-    """PDF를 읽어 청크로 나누고, 각 청크에 권한 메타데이터를 붙인다.
+    """문서를 읽어 청크로 나누고, 각 청크에 권한 메타데이터를 붙인다.
+
+    PDF·PPTX·DOCX·TXT를 지원한다. 포맷 판별은 display_name의 확장자로 한다.
 
     course_id  : 과목 코드. '공통'이면 전교 공개 자료로 취급한다.
     visibility : 공개 / 수강생 / 교수자
     """
-    loader = PyMuPDFLoader(pdf_path)
-    docs = loader.load()
+    docs = loaders.load(pdf_path, display_name)
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=400,
@@ -170,20 +172,19 @@ def _refuse(reason, best_score):
     }
 
 
+def _cite(doc):
+    """출처 표기를 만든다. 포맷에 따라 페이지·슬라이드·구간으로 부른다."""
+    name = doc.metadata.get("file_name", "알 수 없음")
+    label = loaders.location_label(name)
+    return f"{name} {label}{doc.metadata.get('page', 0) + 1}"
+
+
 def _build_context(docs):
-    return "\n\n".join(
-        f"[{d.metadata.get('file_name', '?')} p.{d.metadata.get('page', 0) + 1}]\n{d.page_content}"
-        for d in docs
-    )
+    return "\n\n".join(f"[{_cite(d)}]\n{d.page_content}" for d in docs)
 
 
 def _build_sources(docs):
-    sources = []
-    for d in docs:
-        name = d.metadata.get("file_name", "알 수 없음")
-        page = d.metadata.get("page", 0) + 1
-        sources.append(f"{name} p.{page}")
-    return list(dict.fromkeys(sources))
+    return list(dict.fromkeys(_cite(d) for d in docs))
 
 
 # ============================================================

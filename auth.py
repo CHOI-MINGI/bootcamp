@@ -56,22 +56,13 @@ def _default_courses():
 # 역할 판정
 # ============================================================
 def resolve_role(email):
-    """메일 주소로 역할과 과목을 결정한다."""
-    email = (email or "").lower()
+    """메일 주소로 역할과 과목을 결정한다.
 
-    if email in _env_list("ADMIN_EMAILS"):
-        role = "관리자"
-    elif email in _env_list("PROFESSOR_EMAILS"):
-        role = "교수자"
-    else:
-        role = "학습자"
-
-    course_map = {k.lower(): v for k, v in _json_env("COURSE_MAP").items()}
-    courses = course_map.get(email)
-    if courses is None:
-        courses = _default_courses()
-
-    return role, courses
+    판단 근거는 사용자 명부(users.json)다.
+    환경변수는 명부가 비어 있을 때 초기값을 만드는 데만 쓰인다.
+    """
+    import users
+    return users.resolve(email)
 
 
 def is_domain_allowed(email):

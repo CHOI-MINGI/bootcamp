@@ -16,8 +16,10 @@ except Exception:
 
 import ui
 import auth
+import users
 import storage
 import logger
+import loaders
 from rag_module import (load_documents, add_documents, create_rag_chain,
                         ask, generate, TASK_PROMPTS, SIMILARITY_THRESHOLD)
 from slides import generate_slide_data, build_pptx
@@ -82,7 +84,10 @@ with st.sidebar:
     st.header("자료 등록")
 
     uploaded_files = st.file_uploader(
-        "PDF 파일 (여러 개 선택 가능)", type=["pdf"], accept_multiple_files=True
+        "자료 파일 (여러 개 선택 가능)",
+        type=loaders.SUPPORTED,
+        accept_multiple_files=True,
+        help="PDF · PPTX · DOCX · TXT · MD 지원",
     )
     course_id = st.text_input("과목 코드", value="공통",
                               help="'공통'으로 두면 전교 공개 자료가 됩니다.")
@@ -131,9 +136,8 @@ with st.sidebar:
                 st.success(f"{uploaded_file.name} — {len(docs)}개 청크")
 
             except Exception as e:
-                st.error(f"{uploaded_file.name} 분석 실패. "
-                         "스캔 이미지 PDF이거나 파일이 손상되었을 수 있습니다.")
-                st.caption(f"원인: {type(e).__name__} - {e}")
+                st.error(f"{uploaded_file.name} 분석 실패")
+                st.caption(f"원인: {e}")
 
             finally:
                 if os.path.exists(temp_path):
@@ -157,8 +161,9 @@ with st.sidebar:
             if ROLE in ("교수자", "관리자"):
                 if st.button("삭제", key=f"del_{item['file']}",
                              use_container_width=True):
-                    with st.spinner(f"{item['file']} 삭제 후 인덱스를 다시 만드는 중..."):
+                    with st.spinner(f"{item['file']} 삭제 중..."):
                         vs, library, pdf_store = storage.delete_document(
+                            st.session_state.vectorstore,
                             item["file"],
                             st.session_state.library,
                             st.session_state.pdf_store,
@@ -368,8 +373,17 @@ def dashboard_tab():
     ui.section("이용 현황",
                "기록된 사용 로그를 집계합니다. 임계값 조정과 성능 점검에 사용합니다.")
 
+    # 화면을 열 때마다 보관 기간이 지난 기록을 정리한다.
+    purged = logger.purge_expired()
+    if purged:
+        st.caption(f"보관 기간이 지난 기록 {purged}건을 삭제했습니다.")
+
     rows = logger.read_logs()
     summary = logger.summarize(rows)
+
+    policy = (f"질문 원문 저장 {'함' if logger.keep_questions() else '안 함'} · "
+              f"보관 기간 {logger.retention_days()}일")
+    st.caption(f"로그 정책 — {policy}")
 
     if not summary:
         st.info("아직 기록이 없습니다. 질의응답이나 생성 기능을 사용하면 쌓입니다.")
@@ -432,9 +446,73 @@ def dashboard_tab():
         st.rerun()
 
 
+def accounts_tab():
+    """관리자 전용 — 사용자 역할·과목 관리."""
+    ui.section("계정 관리",
+               "로그인한 계정의 역할과 과목을 여기서 정합니다. "
+               "명부에 없는 사용자는 학습자로 처리됩니다.")
+
+    roster = users.load()
+
+    st.markdown("**등록된 사용자**")
+
+    if roster:
+        st.dataframe(
+            [{"메일": e, "역할": v.get("role", ""),
+              "과목": ", ".join(v.get("courses", []))}
+             for e, v in sorted(roster.items())],
+            use_container_width=True, hide_index=True,
+        )
+    else:
+        st.caption("아직 등록된 사용자가 없습니다.")
+
+    st.divider()
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown("**추가 · 수정**")
+        with st.form("user_upsert"):
+            email = st.text_input("메일 주소")
+            role = st.selectbox("역할", users.ROLES, index=2)
+            courses = st.text_input("과목 코드", placeholder="예: EE201, EE305")
+            saved = st.form_submit_button("저장", use_container_width=True)
+
+        if saved:
+            try:
+                users.upsert(email, role,
+                             [c.strip() for c in courses.split(",") if c.strip()])
+                st.success(f"{email} 저장했습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+    with c2:
+        st.markdown("**삭제**")
+        if roster:
+            target = st.selectbox("대상", sorted(roster.keys()), key="user_del")
+            if st.button("삭제", use_container_width=True):
+                try:
+                    users.remove(target, st.session_state.user_id)
+                    st.success(f"{target} 삭제했습니다.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+        else:
+            st.caption("삭제할 사용자가 없습니다.")
+
+    st.divider()
+    st.caption("역할 권한 — 관리자: 전체 자료 및 계정 관리 · "
+               "교수자: 담당 과목 자료와 자료 생성 · "
+               "학습자: 수강 과목의 공개·수강생 자료")
+
+
 if VIEW == "교수자":
-    tabs = st.tabs(["질의응답", "문항 생성", "강의계획서", "핵심 요약",
-                    "강의 슬라이드", "이용 현황"])
+    labels = ["질의응답", "문항 생성", "강의계획서", "핵심 요약",
+              "강의 슬라이드", "이용 현황"]
+    if ROLE == "관리자":
+        labels.append("계정 관리")
+    tabs = st.tabs(labels)
 
     with tabs[0]:
         ui.section("자료 기반 질의응답",
@@ -562,6 +640,10 @@ if VIEW == "교수자":
 
     with tabs[5]:
         dashboard_tab()
+
+    if ROLE == "관리자":
+        with tabs[6]:
+            accounts_tab()
 
 else:
     tabs = st.tabs(["질의응답", "예상 문제", "오답 설명"])

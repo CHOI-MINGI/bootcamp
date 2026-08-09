@@ -7,15 +7,35 @@
   - 응답 시간을 측정해 느린 구간을 찾기 위해서다.
 
 기록 위치: data/usage_log.csv
-개인정보가 될 수 있는 질문 원문이 남으므로, 저장소에 커밋하지 않는다(.gitignore).
+
+개인정보 보호
+    질문 원문은 개인정보가 될 수 있다. 두 가지 장치를 둔다.
+      - LOG_QUESTIONS=0 으로 두면 질문을 저장하지 않고 길이만 남긴다.
+      - LOG_RETENTION_DAYS 이 지난 기록은 자동으로 지운다.
+    로그 파일 자체도 저장소에 커밋하지 않는다(.gitignore).
 """
 
 import csv
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 LOG_DIR = "data"
 LOG_PATH = os.path.join(LOG_DIR, "usage_log.csv")
+
+# 기본값: 질문 원문을 남기고 90일 보관
+DEFAULT_RETENTION_DAYS = 90
+
+
+def keep_questions():
+    """질문 원문을 저장할지 여부."""
+    return os.getenv("LOG_QUESTIONS", "1").strip() not in ("0", "false", "False")
+
+
+def retention_days():
+    try:
+        return max(1, int(os.getenv("LOG_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)))
+    except ValueError:
+        return DEFAULT_RETENTION_DAYS
 
 FIELDS = [
     "시각",
@@ -40,13 +60,20 @@ def log(user_id, role, feature, question, result, elapsed):
 
         score = result.get("best_score")
 
+        text = (question or "").replace("\n", " ")
+        if keep_questions():
+            recorded = text[:200]
+        else:
+            # 원문 대신 길이만 남긴다. 통계는 유지되고 내용은 남지 않는다.
+            recorded = f"(미기록 · {len(text)}자)"
+
         row = {
             "시각": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "사용자": user_id,
             "역할": role,
             "기능": feature,
-            "질문": (question or "").replace("\n", " ")[:200],
-            "재작성": result.get("rewritten") or "",
+            "질문": recorded,
+            "재작성": (result.get("rewritten") or "") if keep_questions() else "",
             "차단": "Y" if result.get("blocked") else "N",
             "사유": result.get("reason") or "",
             "거리": f"{score:.4f}" if isinstance(score, (int, float)) else "",
@@ -76,6 +103,38 @@ def read_logs():
             return list(csv.DictReader(f))
     except Exception:
         return []
+
+
+def purge_expired():
+    """보관 기간이 지난 기록을 지운다. 지운 건수를 돌려준다."""
+    rows = read_logs()
+    if not rows:
+        return 0
+
+    cutoff = datetime.now() - timedelta(days=retention_days())
+
+    def is_recent(row):
+        try:
+            return datetime.strptime(row.get("시각", ""), "%Y-%m-%d %H:%M:%S") >= cutoff
+        except ValueError:
+            # 시각을 읽을 수 없는 줄은 판단할 수 없으므로 남겨 둔다.
+            return True
+
+    kept = [r for r in rows if is_recent(r)]
+    removed = len(rows) - len(kept)
+
+    if removed == 0:
+        return 0
+
+    try:
+        with open(LOG_PATH, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDS)
+            writer.writeheader()
+            writer.writerows(kept)
+    except Exception:
+        return 0
+
+    return removed
 
 
 def summarize(rows):
