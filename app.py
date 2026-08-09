@@ -87,7 +87,8 @@ with st.sidebar:
         "자료 파일 (여러 개 선택 가능)",
         type=loaders.SUPPORTED,
         accept_multiple_files=True,
-        help="PDF · PPTX · DOCX · TXT · MD 지원",
+        help="PDF · PPTX · DOCX · HWP · HWPX · TXT · MD 지원. "
+             "스캔본 PDF는 자동으로 글자를 읽어들입니다.",
     )
     course_id = st.text_input("과목 코드", value="공통",
                               help="'공통'으로 두면 전교 공개 자료가 됩니다.")

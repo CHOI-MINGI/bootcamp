@@ -10,5 +10,6 @@ langchain-google-genai   # Gemini 모델 (운영 전환 시 langchain-anthropic�
 pymupdf                  # PDF 텍스트 · 이미지 추출
 python-pptx              # PPTX 읽기 · 강의 슬라이드 생성
 python-docx              # DOCX 읽기
+olefile                  # HWP 읽기
 faiss-cpu                # 벡터 검색
 google-cloud-storage     # 배포 환경에서 자료·인덱스 영속화
