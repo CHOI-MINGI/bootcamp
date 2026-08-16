@@ -17,6 +17,7 @@
 
 import base64
 import os
+import time
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -32,9 +33,36 @@ FALLBACK_MODELS = [
     "gemini-3.1-flash-image",
 ]
 
+# 삽화 한 장에 쓸 수 있는 시간. Cloud Run 요청 제한이 300초라
+# 한 장에 오래 매달리면 전체 작업이 끊긴다.
+BUDGET_SECONDS = 40
+
 
 def enabled():
     return os.getenv("IMAGE_ENABLED", "1").strip() not in ("0", "false", "False")
+
+
+# 한 번 막히면 남은 슬라이드도 똑같이 막힌다.
+# 슬라이드마다 모든 모델과 호출 방식을 다시 시도하면 수십 번을 헛돌게 되고,
+# 그 사이 요청 제한 시간을 넘겨 화면이 멈춘 것처럼 보인다.
+# 그래서 회복 가능성이 없는 실패는 기억해 두고 곧바로 건너뛴다.
+_blocked_reason = None
+
+# 회복 가능성이 없다고 보는 실패
+_FATAL = ("할당량", "사용할 수 없는 모델", "GOOGLE_API_KEY",
+          "GOOGLE_CLOUD_PROJECT", "설치되어 있지 않습니다", "지원하지 않습니다")
+
+
+def reset_block():
+    """새 작업을 시작할 때 이전 실패 기록을 지운다."""
+    global _blocked_reason
+    _blocked_reason = None
+
+
+def _remember(reason):
+    global _blocked_reason
+    if reason and any(word in reason for word in _FATAL):
+        _blocked_reason = reason
 
 
 def use_vertex():
@@ -89,10 +117,13 @@ Write ONE English sentence describing a clean, minimal, flat vector illustration
 that visually represents this topic.
 
 Rules:
-- No text, no letters, no numbers, no labels in the image.
+- The image must contain ZERO written characters. No words, no labels, no captions,
+  no letters, no numbers, no symbols that look like writing. This is the most
+  important rule. Describe only shapes, objects and colors.
 - No charts with fake data, no diagrams with made-up structure.
 - Use a simple metaphor or object, not a detailed technical diagram.
 - Navy blue and amber color palette, white background, plenty of empty space.
+- End the sentence with: ", with no text or labels anywhere in the image"
 - Output only the sentence. No quotes, no explanation."""
 
 
@@ -198,13 +229,20 @@ def generate_illustration(title, bullets, model=None):
     if not enabled():
         return None, "삽화 기능이 꺼져 있습니다."
 
+    # 앞서 회복 불가능한 이유로 막혔다면 다시 시도하지 않는다.
+    if _blocked_reason:
+        return None, _blocked_reason
+
     try:
         from google import genai
     except ImportError:
-        return None, "google-genai 패키지가 설치되어 있지 않습니다."
+        reason = "google-genai 패키지가 설치되어 있지 않습니다."
+        _remember(reason)
+        return None, reason
 
     client, error = _make_client(genai)
     if client is None:
+        _remember(error)
         return None, error
 
     try:
@@ -214,9 +252,16 @@ def generate_illustration(title, bullets, model=None):
 
     model = model or IMAGE_MODEL
     last_error = ""
+    started = time.time()
 
     for name in [model] + [m for m in FALLBACK_MODELS if m != model]:
         for label, call in _call_variants(client, name, instruction):
+            # 한 장에 너무 오래 매달리면 전체 작업이 요청 제한 시간을 넘긴다.
+            if time.time() - started > BUDGET_SECONDS:
+                reason = f"{name}: 시간이 초과되어 중단"
+                _remember(reason)
+                return None, reason
+
             try:
                 response = call()
                 data = _extract_image(response)
@@ -238,4 +283,6 @@ def generate_illustration(title, bullets, model=None):
                     break
                 last_error = f"{name}: {type(e).__name__}"
 
-    return None, last_error or "이미지 생성 실패"
+    reason = last_error or "이미지 생성 실패"
+    _remember(reason)
+    return None, reason

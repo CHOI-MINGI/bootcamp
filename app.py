@@ -642,8 +642,9 @@ if VIEW == "교수자":
                  "자료 그림만 — 삽화를 만들지 않음\n\n"
                  "생성된 삽화에는 'AI 생성' 표시가 붙으며 근거로 쓰이지 않습니다.",
         )
-        st.caption("자료에 있는 도표가 곧 근거이므로 기본값은 도표 우선입니다. "
-                   "그림을 찾지 못하면 근거 페이지 미리보기로 대체됩니다.")
+        st.caption("관계가 뚜렷한 내용은 도식으로 그립니다. 도식은 파워포인트 도형이라 "
+                   "직접 수정할 수 있고 비용도 들지 않습니다. "
+                   "위 설정은 도식을 만들 수 없는 슬라이드에만 적용됩니다.")
         extra, _ = prompt_controls("slide")
 
         if st.button("슬라이드 생성", key="slide_btn", type="primary"):
@@ -682,14 +683,23 @@ if VIEW == "교수자":
 
                     makes_image = image_mode != "자료 그림만"
 
-                    with st.spinner("PPTX 파일을 만드는 중입니다..."):
-                        st.session_state.pptx_bytes = build_pptx(
-                            topic, result["slides"],
-                            st.session_state.pdf_store,
-                            log=build_log,
-                            image_mode=image_mode,
-                            progress=report if makes_image else None,
-                        )
+                    try:
+                        with st.spinner("PPTX 파일을 만드는 중입니다..."):
+                            st.session_state.pptx_bytes = build_pptx(
+                                topic, result["slides"],
+                                st.session_state.pdf_store,
+                                log=build_log,
+                                image_mode=image_mode,
+                                progress=report if makes_image else None,
+                            )
+                    except Exception as e:
+                        # 파일 조립이 실패하면 다운로드 버튼이 나타나지 않는다.
+                        # 아무 설명 없이 사라지면 원인을 알 수 없으므로 알려 준다.
+                        st.error("PPTX 파일을 만들지 못했습니다. "
+                                 "그림 채우는 방식을 '자료 그림만'으로 두고 다시 시도해 보세요.")
+                        st.caption(f"원인: {type(e).__name__} - {str(e)[:150]}")
+                        build_log.append(f"파일 조립 실패 — {type(e).__name__}")
+
                     status.empty()
                     st.session_state.slide_log = build_log
 
@@ -710,6 +720,9 @@ if VIEW == "교수자":
                         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                         type="primary",
                     )
+                else:
+                    st.info("아래 구성으로 슬라이드를 만들 준비가 되었습니다. "
+                            "**슬라이드 생성**을 눌러 PPTX 파일을 만드세요.")
 
                 if st.session_state.get("slide_log"):
                     with st.expander("슬라이드별 그림 처리 결과"):

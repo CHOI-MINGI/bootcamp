@@ -63,7 +63,8 @@ SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
 2. 반드시 JSON 배열만 출력하십시오. 설명 문장, 인사말, 코드블록 표시를 붙이지 마십시오.
 3. 각 슬라이드는 다음 형식을 따르십시오.
    {{"type": "개념", "title": "슬라이드 제목", "lead": "한 줄 요약",
-     "bullets": ["문장1", "문장2"], "code": "", "source": "파일명 p.페이지"}}
+     "bullets": ["문장1", "문장2"], "code": "", "diagram": null,
+     "source": "파일명 p.페이지"}}
 4. type은 내용의 성격에 따라 아래 넷 중 하나로 정하십시오.
    개념  무엇인지 설명하는 내용
    절차  순서가 있는 단계. bullets를 순서대로 씁니다
@@ -76,8 +77,19 @@ SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
 7. code는 type이 "코드"일 때만 채웁니다. 자료에 있는 코드를 그대로 옮기고,
    12줄을 넘지 않게 핵심 부분만 발췌하십시오. 그 외에는 빈 문자열로 두십시오.
 8. 본문에서도 태그·속성·명령어는 원문 그대로 표기하십시오. 예: <script>, background-color
-9. source에는 그 슬라이드의 근거가 된 출처를 '파일명 p.숫자' 형식으로 정확히 적으십시오.
-10. 모든 내용은 한국어로 작성하십시오.
+9. diagram은 자료에 '무엇이 무엇과 어떻게 연결되는지'가 분명할 때만 채웁니다.
+   억지로 만들지 말고, 관계가 뚜렷하지 않으면 null로 두십시오.
+   {{"kind": "흐름", "nodes": ["웹 클라이언트", "인터넷", "웹 서버"],
+     "edges": [[0, 1, "요청"], [2, 1, "응답"]]}}
+   kind는 셋 중 하나입니다.
+     흐름  A에서 B로 이어지는 과정
+     순환  돌고 도는 관계
+     계층  위아래로 나뉘는 구조
+   nodes는 3~5개, 각 이름은 12자 이내로 짧게 적으십시오.
+   edges의 [출발, 도착, "설명"]에서 번호는 nodes의 순서(0부터)입니다.
+   설명이 필요 없으면 빈 문자열로 두고, 8자를 넘기지 마십시오.
+10. source에는 그 슬라이드의 근거가 된 출처를 '파일명 p.숫자' 형식으로 정확히 적으십시오.
+11. 모든 내용은 한국어로 작성하십시오.
 
 [요청]
 주제 '{topic}'에 대한 강의 슬라이드 {count}장을 구성하십시오.
@@ -86,6 +98,55 @@ SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
 {context}
 
 [JSON 배열만 출력]"""
+
+
+DIAGRAM_KINDS = ("흐름", "순환", "계층")
+
+MAX_NODES = 5
+MAX_NODE_LABEL = 12
+MAX_EDGE_LABEL = 8
+
+
+def _clean_diagram(raw):
+    """LLM이 준 도식 구조를 검사해 그릴 수 있는 형태로 다듬는다.
+
+    노드가 너무 많거나 이름이 길면 도형 밖으로 글자가 넘친다.
+    화살표가 없는 노드 목록은 도식이라 할 수 없으므로 버린다.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    kind = str(raw.get("kind", "")).strip()
+    if kind not in DIAGRAM_KINDS:
+        kind = "흐름"
+
+    nodes = [str(n).strip()[:MAX_NODE_LABEL]
+             for n in raw.get("nodes", []) if str(n).strip()]
+    nodes = nodes[:MAX_NODES]
+
+    if len(nodes) < 2:
+        return None
+
+    edges = []
+    for e in raw.get("edges", []):
+        if not isinstance(e, (list, tuple)) or len(e) < 2:
+            continue
+        try:
+            a, b = int(e[0]), int(e[1])
+        except (TypeError, ValueError):
+            continue
+
+        # 없는 노드를 가리키거나 자기 자신으로 도는 화살표는 버린다.
+        if not (0 <= a < len(nodes)) or not (0 <= b < len(nodes)) or a == b:
+            continue
+
+        label = str(e[2]).strip()[:MAX_EDGE_LABEL] if len(e) > 2 else ""
+        edges.append((a, b, label))
+
+    if not edges:
+        return None
+
+    return {"kind": kind, "nodes": nodes, "edges": edges}
 
 
 def _parse_json(raw):
@@ -123,6 +184,7 @@ def _parse_json(raw):
             "lead": str(item.get("lead", "")).strip(),
             "bullets": [str(b).strip() for b in item.get("bullets", []) if str(b).strip()],
             "code": code,
+            "diagram": _clean_diagram(item.get("diagram")),
             "source": str(item.get("source", "")).strip(),
         })
 
@@ -564,6 +626,231 @@ def _image_slide(prs, index, data, image_bytes, kind):
     _footer(slide, data["source"])
 
 
+# ============================================================
+# 도식 그리기
+# ============================================================
+# 그림을 픽셀로 만들어내지 않고, 관계만 받아 도형으로 배치한다.
+# 화살표 개수와 방향이 지시대로 정확히 그려지고, 한글도 깨지지 않는다.
+# 이미지가 아니라 파워포인트 도형이므로 받는 사람이 직접 고칠 수도 있다.
+def _node_box(slide, x, y, w, h, label, accent=False):
+    shape = _rect(slide, x, y, w, h,
+                  ICE_LIGHT if accent else WHITE,
+                  line=AMBER if accent else NAVY)
+    frame = shape.text_frame
+    frame.word_wrap = True
+    frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+    frame.margin_left = frame.margin_right = Inches(0.05)
+
+    p = frame.paragraphs[0]
+    p.alignment = PP_ALIGN.CENTER
+    run = p.add_run()
+    run.text = label
+    run.font.name = FONT
+    run.font.size = Pt(10.5 if len(label) > 7 else 11.5)
+    run.font.bold = True
+    run.font.color.rgb = NAVY
+    return shape
+
+
+def _line(slide, x1, y1, x2, y2, color=None, width=1.5):
+    """두 점을 잇는 선."""
+    line = slide.shapes.add_connector(2, Inches(x1), Inches(y1),
+                                      Inches(x2), Inches(y2))
+    line.line.color.rgb = color or NAVY
+    line.line.width = Pt(width)
+    return line
+
+
+def _arrow_head(slide, x, y, size=0.13, direction="right"):
+    """연결선에 화살표 머리를 얹는다."""
+    shape_id = {"right": 33, "down": 36, "left": 34, "up": 35}[direction]
+    head = slide.shapes.add_shape(shape_id, Inches(x), Inches(y),
+                                  Inches(size), Inches(size))
+    head.fill.solid()
+    head.fill.fore_color.rgb = NAVY
+    head.line.fill.background()
+    head.shadow.inherit = False
+    style = head._element.find(qn("p:style"))
+    if style is not None:
+        head._element.remove(style)
+
+
+def _draw_flow(slide, diagram, box):
+    """흐름 — 노드를 세로로 쌓고 아래로 잇는다.
+
+    가로로 늘어놓으면 한글 이름이 들어갈 자리가 부족해 세로로 쌓는다.
+    이웃하지 않은 노드끼리 이어질 때는 오른쪽 통로로 우회시켜
+    바로 아래로 가는 화살표와 겹치지 않게 한다.
+    """
+    left, top, width, height = box
+    nodes = diagram["nodes"]
+
+    # 우회하는 화살표가 지날 통로를 오른쪽에 비워 둔다.
+    detour = any(b != a + 1 for a, b, _ in diagram["edges"])
+    lane = 0.55 if detour else 0.0
+
+    node_w = min((width - lane) * 0.86, 3.1)
+    x = left + (width - lane - node_w) / 2
+
+    node_h = 0.6
+    gap = (height - node_h * len(nodes)) / max(len(nodes) - 1, 1)
+    gap = max(min(gap, 0.8), 0.45)
+
+    total = node_h * len(nodes) + gap * (len(nodes) - 1)
+    y = top + (height - total) / 2
+
+    boxes = []
+    for i, name in enumerate(nodes):
+        _node_box(slide, x, y, node_w, node_h, name, accent=(i == len(nodes) - 1))
+        boxes.append({"cx": x + node_w / 2, "cy": y + node_h / 2,
+                      "top": y, "bottom": y + node_h, "right": x + node_w})
+        y += node_h + gap
+
+    lane_x = x + node_w + lane * 0.55
+
+    for a, b, label in diagram["edges"]:
+        pa, pb = boxes[a], boxes[b]
+
+        if b == a + 1:
+            # 바로 아래로 내려가는 화살표
+            _line(slide, pa["cx"], pa["bottom"], pb["cx"], pb["top"] - 0.12)
+            _arrow_head(slide, pb["cx"] - 0.065, pb["top"] - 0.13, direction="down")
+
+            if label:
+                # 화살표 오른쪽에 두어 노드 글자와 겹치지 않게 한다.
+                _text(slide, pa["cx"] + 0.1, (pa["bottom"] + pb["top"]) / 2 - 0.11,
+                      1.1, 0.22, label, size=9, color=GRAY)
+        else:
+            # 오른쪽 통로로 우회한다.
+            _line(slide, pa["right"], pa["cy"], lane_x, pa["cy"], AMBER, 1.4)
+            _line(slide, lane_x, pa["cy"], lane_x, pb["cy"], AMBER, 1.4)
+            _line(slide, lane_x, pb["cy"], pb["right"] + 0.14, pb["cy"], AMBER, 1.4)
+            _arrow_head(slide, pb["right"], pb["cy"] - 0.065, direction="left")
+
+            if label:
+                _text(slide, lane_x + 0.06, (pa["cy"] + pb["cy"]) / 2 - 0.11,
+                      0.7, 0.22, label, size=9, color=GRAY)
+
+
+def _draw_cycle(slide, diagram, box):
+    """순환 — 원 둘레에 배치하고 이웃끼리 잇는다."""
+    import math
+
+    left, top, width, height = box
+    nodes = diagram["nodes"]
+    n = len(nodes)
+
+    node_w, node_h = min(width * 0.42, 1.9), 0.55
+    cx, cy = left + width / 2, top + height / 2
+    rx = (width - node_w) / 2 * 0.92
+    ry = (height - node_h) / 2 * 0.92
+
+    centers = []
+    for i, name in enumerate(nodes):
+        angle = -math.pi / 2 + 2 * math.pi * i / n
+        x = cx + rx * math.cos(angle) - node_w / 2
+        y = cy + ry * math.sin(angle) - node_h / 2
+        _node_box(slide, x, y, node_w, node_h, name)
+        centers.append((x + node_w / 2, y + node_h / 2))
+
+    for i in range(n):
+        j = (i + 1) % n
+        x1, y1 = centers[i]
+        x2, y2 = centers[j]
+
+        # 선을 노드 중심까지 그으면 도형 밑으로 파고든다.
+        # 양 끝을 조금씩 잘라 도형 바깥에서 시작하고 끝나게 한다.
+        dx, dy = x2 - x1, y2 - y1
+        dist = math.hypot(dx, dy) or 1
+        ux, uy = dx / dist, dy / dist
+        trim = 0.55
+
+        sx, sy = x1 + ux * trim, y1 + uy * trim
+        ex, ey = x2 - ux * trim, y2 - uy * trim
+
+        _line(slide, sx, sy, ex, ey, NAVY, 1.4)
+
+        # 도는 방향을 보여야 순환이라는 것이 드러난다.
+        head = "right" if abs(ux) > abs(uy) else "down"
+        if head == "right" and ux < 0:
+            head = "left"
+        if head == "down" and uy < 0:
+            head = "up"
+        _arrow_head(slide, ex - 0.065, ey - 0.065, direction=head)
+
+    # 선이 노드를 덮지 않도록 노드를 다시 그린다.
+    for i, name in enumerate(nodes):
+        x, y = centers[i][0] - node_w / 2, centers[i][1] - node_h / 2
+        _node_box(slide, x, y, node_w, node_h, name)
+
+
+def _draw_tree(slide, diagram, box):
+    """계층 — 첫 노드를 위에 두고 나머지를 아래에 나란히 둔다."""
+    left, top, width, height = box
+    nodes = diagram["nodes"]
+
+    node_h = 0.6
+    root_w = min(width * 0.6, 2.8)
+    _node_box(slide, left + (width - root_w) / 2, top + 0.1, root_w, node_h,
+              nodes[0], accent=True)
+
+    children = nodes[1:]
+    if not children:
+        return
+
+    child_w = min((width - 0.3 * (len(children) - 1)) / len(children), 2.4)
+    total = child_w * len(children) + 0.3 * (len(children) - 1)
+    x = left + (width - total) / 2
+    y = top + 0.1 + node_h + 0.85
+
+    root_cx = left + width / 2
+    root_bottom = top + 0.1 + node_h
+
+    for name in children:
+        _node_box(slide, x, y, child_w, node_h, name)
+
+        cx = x + child_w / 2
+        _line(slide, root_cx, root_bottom, root_cx, root_bottom + 0.42, width=1.4)
+        _line(slide, root_cx, root_bottom + 0.42, cx, root_bottom + 0.42, width=1.4)
+        _line(slide, cx, root_bottom + 0.42, cx, y - 0.13, width=1.4)
+
+        _arrow_head(slide, cx - 0.065, y - 0.14, direction="down")
+        x += child_w + 0.3
+
+
+def _draw_diagram(slide, diagram, box):
+    """도식을 그린다. box는 (왼쪽, 위, 너비, 높이)."""
+    if diagram["kind"] == "순환":
+        _draw_cycle(slide, diagram, box)
+    elif diagram["kind"] == "계층":
+        _draw_tree(slide, diagram, box)
+    else:
+        _draw_flow(slide, diagram, box)
+
+
+def _diagram_slide(prs, index, data):
+    """왼쪽 본문 + 오른쪽 도식."""
+    slide = _blank(prs)
+    _header(slide, index, data["title"], data["lead"])
+
+    bullets = data["bullets"][:4]
+    card_h, gap = 0.92, 0.13
+    total = len(bullets) * card_h + max(len(bullets) - 1, 0) * gap
+    top = 2.45 + (3.9 - total) / 2
+
+    for bullet in bullets:
+        _rect(slide, 0.62, top, 6.1, card_h, WHITE, line=LINE)
+        _rect(slide, 0.62, top, 0.055, card_h, AMBER, shape=MSO_SHAPE.RECTANGLE)
+        _text(slide, 0.92, top + 0.06, 5.6, card_h - 0.12, bullet, size=12,
+              color=TEXT, anchor=MSO_ANCHOR.MIDDLE, spacing=1.15)
+        top += card_h + gap
+
+    _rect(slide, 7.0, 2.35, 5.75, 4.1, LIGHT, line=LINE)
+    _draw_diagram(slide, data["diagram"], (7.15, 2.5, 5.45, 3.8))
+
+    _footer(slide, data["source"])
+
+
 def _code_slide(prs, index, data):
     """코드형 — 왼쪽 설명, 오른쪽 코드 블록."""
     slide = _blank(prs)
@@ -805,6 +1092,14 @@ def build_pptx(topic, slides, pdf_store=None, log=None,
 
     total = len(slides)
 
+    # 이전 작업에서 막혔던 기록을 지우고 시작한다.
+    if image_mode != IMAGE_MODE_NONE:
+        try:
+            import imagegen
+            imagegen.reset_block()
+        except Exception:
+            pass
+
     for i, data in enumerate(slides, start=1):
         image_bytes, kind = None, None
         note = ""
@@ -833,10 +1128,13 @@ def build_pptx(topic, slides, pdf_store=None, log=None,
                                         allow_page_render=False)
             return (img, k, "자료 도표 사용") if img else (None, None, "")
 
-        # 선택한 방식에 따라 순서를 바꾼다.
-        if image_mode == IMAGE_MODE_ILLUST:
+        # 도식이 있으면 삽화를 만들지 않는다.
+        # 도식은 자료의 관계를 그대로 옮긴 것이라 정확하고 비용도 들지 않는다.
+        can_illustrate = not data.get("diagram")
+
+        if image_mode == IMAGE_MODE_ILLUST and can_illustrate:
             steps = [make_illustration, find_diagram]
-        elif image_mode == IMAGE_MODE_DIAGRAM:
+        elif image_mode == IMAGE_MODE_DIAGRAM and can_illustrate:
             steps = [find_diagram, make_illustration]
         else:
             steps = [find_diagram]
@@ -856,18 +1154,27 @@ def build_pptx(topic, slides, pdf_store=None, log=None,
             if image_bytes:
                 note = (note + " / 페이지 썸네일로 대체").strip(" /")
 
+        if data.get("diagram") and not image_bytes:
+            note = f"도식 생성 ({data['diagram']['kind']})"
+
         if log is not None:
             log.append(f"{i}. {data['title']} — {note or '그림 없음 (카드형)'}")
 
-        # 코드는 그림보다 코드 자체를 보여주는 편이 낫다.
-        if data.get("type") == "코드" and data.get("code"):
+        # 유형별 배치가 내용을 드러내는 경우에는 그림보다 그쪽을 앞세운다.
+        # 비교를 좌우로 나누지 않으면 "A | B" 같은 구분 기호가 그대로 보이고,
+        # 절차를 번호 없이 늘어놓으면 순서라는 사실이 사라진다.
+        kind_of = data.get("type")
+
+        if kind_of == "코드" and data.get("code"):
             _code_slide(prs, i, data)
+        elif kind_of == "비교":
+            _compare_slide(prs, i, data)
+        elif kind_of == "절차" and not data.get("diagram"):
+            _step_slide(prs, i, data)
         elif image_bytes:
             _image_slide(prs, i, data, image_bytes, kind)
-        elif data.get("type") == "절차":
-            _step_slide(prs, i, data)
-        elif data.get("type") == "비교":
-            _compare_slide(prs, i, data)
+        elif data.get("diagram"):
+            _diagram_slide(prs, i, data)
         else:
             _card_slide(prs, i, data)
 
