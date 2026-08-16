@@ -56,6 +56,32 @@ SLIDE_TYPES = ("개념", "절차", "비교", "코드")
 # ============================================================
 # 2. LLM에게 슬라이드 구성을 받아오는 부분
 # ============================================================
+# 두 단계로 나눈다.
+#   1) 아웃라인 — 어떤 제목으로 몇 장을 만들지 먼저 정한다.
+#   2) 본문 — 제목마다 다시 검색해 그 슬라이드에 맞는 근거를 붙여 채운다.
+#
+# 한 번의 검색 결과로 전체를 만들면 슬라이드마다 필요한 근거가 다른데도
+# 같은 재료를 나눠 쓰게 되어 뒤로 갈수록 내용이 얕아진다.
+OUTLINE_TEMPLATE = """당신은 OO대학교의 강의자료 기획 AI입니다.
+
+[할 일]
+주제 '{topic}'로 강의 슬라이드 {count}장을 만들려고 합니다.
+각 슬라이드의 제목만 먼저 정하십시오. 내용은 아직 쓰지 마십시오.
+
+[규칙]
+1. 아래 [자료]에 실제로 있는 내용만 다루십시오.
+2. 강의 흐름을 따르십시오. 개념 정의 → 원리 → 적용·절차 → 주의점 순이 자연스럽습니다.
+3. 제목은 20자 이내의 명사구로 적으십시오. 학생이 나중에 목차로 찾을 수 있어야 합니다.
+4. 제목끼리 내용이 겹치지 않게 하십시오.
+5. JSON 배열만 출력하십시오. 형식은 다음과 같습니다.
+   ["전류와 전압의 정의", "키르히호프 전류 법칙", "절점 해석법의 순서"]
+{extra}
+[자료]
+{context}
+
+[JSON 배열만 출력]"""
+
+
 SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
 
 [규칙]
@@ -77,22 +103,52 @@ SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
 7. code는 type이 "코드"일 때만 채웁니다. 자료에 있는 코드를 그대로 옮기고,
    12줄을 넘지 않게 핵심 부분만 발췌하십시오. 그 외에는 빈 문자열로 두십시오.
 8. 본문에서도 태그·속성·명령어는 원문 그대로 표기하십시오. 예: <script>, background-color
-9. diagram은 자료에 '무엇이 무엇과 어떻게 연결되는지'가 분명할 때만 채웁니다.
-   억지로 만들지 말고, 관계가 뚜렷하지 않으면 null로 두십시오.
+9. diagram은 적극적으로 채우십시오. 그림이 있는 슬라이드가 글만 있는 슬라이드보다 낫습니다.
+   자료에서 아래 중 하나라도 읽히면 반드시 만드십시오.
+     순서나 단계가 있다             → 흐름
+     원인과 결과, 입력과 출력이 있다 → 흐름
+     돌아오거나 반복되는 관계가 있다 → 순환
+     상위 개념 아래 항목이 나뉜다    → 계층
    {{"kind": "흐름", "nodes": ["웹 클라이언트", "인터넷", "웹 서버"],
      "edges": [[0, 1, "요청"], [2, 1, "응답"]]}}
-   kind는 셋 중 하나입니다.
-     흐름  A에서 B로 이어지는 과정
-     순환  돌고 도는 관계
-     계층  위아래로 나뉘는 구조
    nodes는 3~5개, 각 이름은 12자 이내로 짧게 적으십시오.
    edges의 [출발, 도착, "설명"]에서 번호는 nodes의 순서(0부터)입니다.
    설명이 필요 없으면 빈 문자열로 두고, 8자를 넘기지 마십시오.
+   자료에 없는 관계를 지어내서는 안 됩니다. 다만 자료에 있는 관계를 그냥 넘기지도 마십시오.
+   관계를 정말 찾을 수 없을 때만 null로 두십시오.
 10. source에는 그 슬라이드의 근거가 된 출처를 '파일명 p.숫자' 형식으로 정확히 적으십시오.
-11. 모든 내용은 한국어로 작성하십시오.
+11. 같은 type이 연속으로 두 번 나오지 않게 구성하십시오.
+12. type이 "개념"인 슬라이드는 전체의 절반을 넘기지 마십시오.
+13. 모든 내용은 한국어로 작성하십시오.
+
+[예시]
+아래는 다른 주제로 잘 작성된 슬라이드입니다. 형식과 밀도를 이 정도로 맞추십시오.
+[
+  {{"type": "개념", "title": "관계형 데이터베이스",
+    "lead": "데이터를 표로 나누고 열쇠로 이어 붙인다",
+    "bullets": ["행은 하나의 사례, 열은 하나의 속성을 뜻한다",
+                "기본키는 행을 중복 없이 가리키는 열이다",
+                "외래키는 다른 표의 기본키를 가리켜 두 표를 잇는다"],
+    "code": "",
+    "diagram": {{"kind": "계층", "nodes": ["데이터베이스", "테이블", "행", "열"],
+                "edges": [[0, 1, "포함"], [1, 2, ""], [1, 3, ""]]}},
+    "source": "DB개론.pdf p.12"}},
+  {{"type": "절차", "title": "질의 처리 순서",
+    "lead": "SQL 한 줄은 네 단계를 거쳐 결과가 된다",
+    "bullets": ["구문 분석에서 문법 오류를 먼저 걸러낸다",
+                "최적화기가 여러 실행 경로 중 비용이 낮은 것을 고른다",
+                "실행기가 선택된 경로대로 데이터를 읽는다",
+                "결과를 정해진 형식으로 묶어 돌려준다"],
+    "code": "",
+    "diagram": {{"kind": "흐름", "nodes": ["질의 입력", "구문 분석", "최적화", "실행", "결과 반환"],
+                "edges": [[0, 1, ""], [1, 2, ""], [2, 3, "실행 계획"], [3, 4, ""]]}},
+    "source": "DB개론.pdf p.31"}}
+]
 
 [요청]
 주제 '{topic}'에 대한 강의 슬라이드 {count}장을 구성하십시오.
+[자료]에 슬라이드 번호와 제목이 미리 정해져 있으면 그 제목을 그대로 쓰고,
+각 슬라이드는 자기 번호에 배정된 근거를 우선 사용하십시오.
 {extra}
 [자료]
 {context}
@@ -194,16 +250,107 @@ def _parse_json(raw):
     return cleaned
 
 
+def _parse_titles(raw, count):
+    """아웃라인 응답에서 제목 목록을 꺼낸다."""
+    text = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        raise ValueError("제목 배열을 찾지 못했습니다.")
+
+    titles = []
+    for item in json.loads(text[start:end + 1]):
+        title = str(item).strip()
+        if title and title not in titles:
+            titles.append(title)
+
+    if not titles:
+        raise ValueError("제목이 비어 있습니다.")
+
+    return titles[:count]
+
+
+def _outline_context(docs):
+    """아웃라인 단계용 자료 묶음.
+
+    본문 단계와 달리 유사도 순이 아니라 '자료에 실린 순서'로 늘어놓는다.
+    앞에서 뒤로 읽히면 문서가 어떤 순서로 전개되는지가 드러나므로,
+    LLM이 강의 흐름에 맞는 목차를 잡기 쉬워진다.
+    """
+    def position(doc):
+        meta = doc.metadata or {}
+        return (str(meta.get("source", "")), meta.get("page", 0) or 0)
+
+    return _build_context(sorted(docs, key=position))
+
+
+def _slide_context(pairs):
+    """슬라이드별로 배정된 근거를 번호와 제목을 붙여 늘어놓는다."""
+    blocks = []
+    for i, (title, docs) in enumerate(pairs, start=1):
+        blocks.append(f"[슬라이드 {i}] 제목: {title}\n{_build_context(docs)}")
+    return "\n\n".join(blocks)
+
+
 def generate_slide_data(vectorstore, topic, count=5, role="교수자", courses=(),
                         k=6, extra=""):
     """자료를 근거로 슬라이드 구성(JSON)을 만든다.
 
+    두 단계로 나눈다.
+      1) 아웃라인 — 넓게 검색해 슬라이드 제목을 먼저 정한다.
+      2) 본문 — 제목마다 다시 검색해 그 슬라이드에 맞는 근거를 붙여 채운다.
+
+    한 번 검색한 결과를 여러 장이 나눠 쓰면 뒤로 갈수록 쓸 내용이 떨어진다.
+    검색은 임베딩 계산이라 값이 싸므로, 제목 수만큼 다시 찾아도 부담이 적다.
+    LLM 호출만 두 번으로 묶어 비용을 억제한다.
+
     extra : 교수자가 입력한 추가 지시사항 (선택)
     """
-    docs, best_score, blocked = _search(vectorstore, topic, role, courses, k)
+    # 아웃라인 단계는 문서 전체 구성을 봐야 하므로 더 넓게 가져온다.
+    docs, best_score, blocked = _search(vectorstore, topic, role, courses, max(k, count * 2))
     if blocked:
         return blocked
 
+    # ---------- 1단계: 제목 정하기 ----------
+    outline_chain = (ChatPromptTemplate.from_template(OUTLINE_TEMPLATE)
+                     | get_llm(0.2) | StrOutputParser())
+    try:
+        titles = _parse_titles(outline_chain.invoke({
+            "topic": topic,
+            "count": count,
+            "extra": _format_extra(extra),
+            "context": _outline_context(docs),
+        }), count)
+    except Exception:
+        # 아웃라인이 실패해도 기능을 멈추지 않는다.
+        # 제목 없이 예전 방식대로 한 번에 만들면 결과가 조금 얕아질 뿐이다.
+        titles = []
+
+    # ---------- 2단계: 제목별 근거 모으기 ----------
+    if titles:
+        pairs, seen = [], []
+        for title in titles:
+            # 제목만으로 검색하면 주제에서 벗어날 수 있어 주제를 함께 넣는다.
+            found, _, sub_blocked = _search(vectorstore, f"{topic} {title}",
+                                            role, courses, 4)
+            # 가드레일에 걸리면 앞서 받아둔 자료로 대신한다.
+            pairs.append((title, found if not sub_blocked and found else docs[:3]))
+            seen.extend(pairs[-1][1])
+
+        context = _slide_context(pairs)
+
+        # 출처 목록은 실제로 쓰인 자료 전체를 기준으로 만든다.
+        # 검색마다 새 객체가 만들어지므로 내용으로 중복을 걸러낸다.
+        unique = {}
+        for doc in seen:
+            meta = doc.metadata or {}
+            key = (meta.get("source"), meta.get("page"), doc.page_content[:40])
+            unique.setdefault(key, doc)
+        docs = list(unique.values())
+    else:
+        context = _build_context(docs)
+
+    # ---------- 3단계: 본문 채우기 ----------
     prompt = ChatPromptTemplate.from_template(SLIDE_TEMPLATE)
     # 슬라이드는 JSON 형식을 지켜야 하므로 생성 기능 중 가장 낮은 값을 쓴다.
     chain = prompt | get_llm(0.2) | StrOutputParser()
@@ -213,7 +360,7 @@ def generate_slide_data(vectorstore, topic, count=5, role="교수자", courses=(
             "topic": topic,
             "count": count,
             "extra": _format_extra(extra),
-            "context": _build_context(docs),
+            "context": context,
         })
     except Exception as e:
         result = _failed(e)
