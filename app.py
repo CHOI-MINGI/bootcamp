@@ -38,7 +38,7 @@ import loaders
 from rag_module import (load_documents, add_documents, create_rag_chain,
                         ask, generate, friendly_error,
                         TASK_PROMPTS, SIMILARITY_THRESHOLD)
-from slides import generate_slide_data, build_pptx
+from slides import generate_slide_data, build_pptx, IMAGE_MODES
 
 st.set_page_config(
     page_title="OO대학교 AI 학습 도우미",
@@ -635,13 +635,15 @@ if VIEW == "교수자":
         topic = st.text_input("주제", key="slide_topic", placeholder="예: 옴의 법칙")
         c1, c2 = st.columns([1, 2])
         count = c1.number_input("슬라이드 수", 1, 10, 5, key="slide_count")
-        use_illust = c2.checkbox(
-            "도표가 없는 슬라이드에 AI 삽화 넣기",
-            key="slide_illust",
-            help="자료에 도표가 있으면 그것을 먼저 사용합니다. "
-                 "생성된 삽화에는 'AI 생성' 표시가 붙으며, 근거로 쓰이지 않습니다.",
+        image_mode = c2.selectbox(
+            "그림 채우는 방식", IMAGE_MODES, key="slide_image_mode",
+            help="자료 도표 우선 — 자료에 있는 그림을 먼저 쓰고, 없으면 AI 삽화\n"
+                 "AI 삽화 우선 — 도표가 있어도 삽화를 만듦\n"
+                 "자료 그림만 — 삽화를 만들지 않음\n\n"
+                 "생성된 삽화에는 'AI 생성' 표시가 붙으며 근거로 쓰이지 않습니다.",
         )
-        st.caption("슬라이드의 그림은 기본적으로 업로드한 자료의 도표와 페이지에서 가져옵니다.")
+        st.caption("자료에 있는 도표가 곧 근거이므로 기본값은 도표 우선입니다. "
+                   "그림을 찾지 못하면 근거 페이지 미리보기로 대체됩니다.")
         extra, _ = prompt_controls("slide")
 
         if st.button("슬라이드 생성", key="slide_btn", type="primary"):
@@ -678,13 +680,15 @@ if VIEW == "교수자":
                     def report(current, total, message):
                         status.caption(f"{message} ({current}/{total})")
 
+                    makes_image = image_mode != "자료 그림만"
+
                     with st.spinner("PPTX 파일을 만드는 중입니다..."):
                         st.session_state.pptx_bytes = build_pptx(
                             topic, result["slides"],
                             st.session_state.pdf_store,
                             log=build_log,
-                            use_illustration=use_illust,
-                            progress=report if use_illust else None,
+                            image_mode=image_mode,
+                            progress=report if makes_image else None,
                         )
                     status.empty()
                     st.session_state.slide_log = build_log

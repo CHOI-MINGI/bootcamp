@@ -44,9 +44,13 @@ WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 LIGHT = RGBColor(0xF3, 0xF6, 0xFB)
 
 FONT = "맑은 고딕"
+MONO = "Consolas"
 
 SLIDE_W = 13.333
 SLIDE_H = 7.5
+
+# 내용의 성격에 따라 배치를 달리한다. 전부 같은 모양이면 읽는 사람이 지친다.
+SLIDE_TYPES = ("개념", "절차", "비교", "코드")
 
 
 # ============================================================
@@ -58,11 +62,22 @@ SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
 1. 아래 [자료]에 있는 내용만 사용하십시오. 자료에 없는 내용은 절대 지어내지 마십시오.
 2. 반드시 JSON 배열만 출력하십시오. 설명 문장, 인사말, 코드블록 표시를 붙이지 마십시오.
 3. 각 슬라이드는 다음 형식을 따르십시오.
-   {{"title": "슬라이드 제목", "lead": "한 줄 요약", "bullets": ["문장1", "문장2"], "source": "파일명 p.페이지"}}
-4. lead는 그 슬라이드의 핵심을 한 문장(35자 이내)으로 요약한 것입니다.
-5. bullets는 슬라이드당 3~4개, 각 문장은 45자 이내로 작성하십시오.
-6. source에는 그 슬라이드의 근거가 된 출처를 '파일명 p.숫자' 형식으로 정확히 적으십시오.
-7. 모든 내용은 한국어로 작성하십시오.
+   {{"type": "개념", "title": "슬라이드 제목", "lead": "한 줄 요약",
+     "bullets": ["문장1", "문장2"], "code": "", "source": "파일명 p.페이지"}}
+4. type은 내용의 성격에 따라 아래 넷 중 하나로 정하십시오.
+   개념  무엇인지 설명하는 내용
+   절차  순서가 있는 단계. bullets를 순서대로 씁니다
+   비교  둘을 견주는 내용. bullets를 "A 항목 | B 항목" 형태로 짝지어 씁니다
+   코드  코드나 태그가 핵심인 내용. code 항목에 원문을 넣습니다
+5. lead는 그 슬라이드에서 학습자가 얻어야 할 핵심을 한 문장(35자 이내)으로 적습니다.
+   bullets에 나올 문장을 그대로 옮기지 마십시오. 겹치면 같은 말을 두 번 하는 셈입니다.
+6. bullets는 슬라이드당 3~4개, 각 문장은 45자 이내로 작성하십시오.
+   서로 다른 내용을 담아야 하며, 표현만 바꾼 반복은 넣지 마십시오.
+7. code는 type이 "코드"일 때만 채웁니다. 자료에 있는 코드를 그대로 옮기고,
+   12줄을 넘지 않게 핵심 부분만 발췌하십시오. 그 외에는 빈 문자열로 두십시오.
+8. 본문에서도 태그·속성·명령어는 원문 그대로 표기하십시오. 예: <script>, background-color
+9. source에는 그 슬라이드의 근거가 된 출처를 '파일명 p.숫자' 형식으로 정확히 적으십시오.
+10. 모든 내용은 한국어로 작성하십시오.
 
 [요청]
 주제 '{topic}'에 대한 강의 슬라이드 {count}장을 구성하십시오.
@@ -93,10 +108,21 @@ def _parse_json(raw):
     for item in data:
         if not isinstance(item, dict):
             continue
+
+        kind = str(item.get("type", "")).strip()
+        if kind not in SLIDE_TYPES:
+            kind = "개념"
+
+        code = str(item.get("code", "") or "").strip()
+        if code and kind != "코드":
+            kind = "코드"          # 코드를 넣었으면 그 유형으로 다룬다
+
         cleaned.append({
+            "type": kind,
             "title": str(item.get("title", "")).strip(),
             "lead": str(item.get("lead", "")).strip(),
             "bullets": [str(b).strip() for b in item.get("bullets", []) if str(b).strip()],
+            "code": code,
             "source": str(item.get("source", "")).strip(),
         })
 
@@ -169,14 +195,18 @@ def _parse_source(source):
     return m.group(1).strip(), int(m.group(2))
 
 
-def _ink_ratio(image_bytes):
-    """이미지에서 흰색이 아닌 픽셀의 비율을 구한다.
+def _image_stats(image_bytes):
+    """이미지의 (내용 비율, 흑백 여부)를 구한다.
 
-    PDF에는 테두리만 있는 빈 상자나 배경 도형이 이미지로 들어 있는 경우가 많다.
-    그런 것을 슬라이드에 넣으면 빈 네모만 보이므로, 내용이 있는지 미리 걸러낸다.
+    내용 비율 — 흰색이 아닌 픽셀의 비율. 낮으면 테두리만 있는 빈 상자다.
+    흑백 여부 — 색이 없으면 투명도 마스크일 가능성이 높다.
+
+    둘을 같이 봐야 한다. 비율만 보면 색이 진한 사진까지 걸러지고,
+    흑백 여부만 보면 진짜 흑백 도표까지 걸러진다.
     """
     try:
         pix = fitz.Pixmap(image_bytes)
+        is_gray = pix.n - (1 if pix.alpha else 0) == 1
 
         # 알파 채널이나 CMYK는 RGB로 변환한다.
         if pix.alpha or pix.colorspace is None or pix.n > 3:
@@ -190,30 +220,101 @@ def _ink_ratio(image_bytes):
         n = pix.n
         total = pix.width * pix.height
         if total == 0:
-            return 0.0
+            return 0.0, is_gray
 
         ink = 0
         for i in range(0, len(data), n):
-            # 세 채널 중 하나라도 어두우면 '내용이 있는 픽셀'로 본다.
             if min(data[i], data[i + 1], data[i + 2]) < 235:
                 ink += 1
 
-        return ink / total
+        return ink / total, is_gray
 
     except Exception:
         # 판단할 수 없으면 일단 쓸 만하다고 본다.
-        return 1.0
+        return 1.0, False
+
+
+def _ink_ratio(image_bytes):
+    return _image_stats(image_bytes)[0]
+
+
+def _figure_rect(page, seed_side=60, include_side=18):
+    """페이지에서 '그림이 있는 영역'을 하나의 사각형으로 잡는다.
+
+    도표는 보통 사진·아이콘·화살표가 모여 하나의 뜻을 이룬다.
+    그중 이미지 한 개만 떼어내면 의미가 사라지므로, 흩어진 그림들을
+    묶어 그 영역을 통째로 잘라낸다.
+
+    기준을 둘로 나눈 이유
+      seed_side    이만한 그림이 하나라도 있어야 '도표가 있는 페이지'로 본다.
+                   작은 아이콘만 흩어져 있는 페이지까지 잘라내면 곤란하다.
+      include_side 영역을 넓힐 때는 작은 아이콘·화살표도 포함한다.
+                   그렇지 않으면 도표 가장자리가 잘려 나간다.
+
+    반환: fitz.Rect 또는 None
+    """
+    rects = []
+    has_seed = False
+
+    def consider(r):
+        nonlocal has_seed
+        if r is None:
+            return
+        # 머리말·꼬리말 띠는 도표가 아니다.
+        if r.width > page.rect.width * 0.95 and r.height < page.rect.height * 0.15:
+            return
+        if r.width >= seed_side and r.height >= seed_side:
+            has_seed = True
+        if r.width >= include_side and r.height >= include_side:
+            rects.append(r)
+
+    for img in page.get_images(full=True):
+        try:
+            for r in page.get_image_rects(img[0]):
+                consider(r)
+        except Exception:
+            continue
+
+    # 도형으로 그린 화살표·상자도 도표의 일부다.
+    try:
+        for d in page.get_drawings():
+            consider(d.get("rect"))
+    except Exception:
+        pass
+
+    if not rects or not has_seed:
+        return None
+
+    area = rects[0]
+    for r in rects[1:]:
+        area = area | r          # 합집합
+
+    # 잘린 느낌이 나지 않도록 여백을 조금 준다.
+    pad = 10
+    area = fitz.Rect(max(area.x0 - pad, page.rect.x0),
+                     max(area.y0 - pad, page.rect.y0),
+                     min(area.x1 + pad, page.rect.x1),
+                     min(area.y1 + pad, page.rect.y1))
+
+    # 너무 좁거나 페이지 전체와 다름없으면 굳이 잘라낼 이유가 없다.
+    if area.width < 100 or area.height < 80:
+        return None
+    if area.width > page.rect.width * 0.98 and area.height > page.rect.height * 0.98:
+        return None
+
+    return area
 
 
 def extract_page_image(pdf_bytes, page_no, min_size=180, min_ink=0.04,
-                       allow_page_render=True):
+                       max_ink=0.90, allow_page_render=True):
     """근거가 된 페이지에서 그림을 가져온다.
 
-    1순위 : 그 페이지에 삽입된 이미지 중 내용이 있고 가장 큰 것 (도표·사진)
-    2순위 : allow_page_render가 True일 때만, 페이지 전체를 렌더링한 썸네일
+    1순위 : 그림들이 모여 있는 영역을 통째로 잘라낸 그림 (도표 전체)
+    2순위 : 삽입된 이미지 중 내용이 있고 가장 큰 것
+    3순위 : allow_page_render가 True일 때만, 페이지 전체를 렌더링한 썸네일
 
-    페이지 렌더링은 거의 항상 성공하므로, 도표만 먼저 찾고 싶을 때는
-    allow_page_render를 False로 두고 단계를 나눠 호출한다.
+    영역을 잘라내는 방식을 먼저 쓰는 이유는, 화면에 보이는 그대로를 담기 때문이다.
+    이미지를 직접 꺼내면 투명도 마스크가 섞이거나 도표의 일부만 나온다.
 
     반환: (이미지 바이트, 종류) 또는 (None, None)
     """
@@ -228,10 +329,29 @@ def extract_page_image(pdf_bytes, page_no, min_size=180, min_ink=0.04,
 
         page = doc[page_no - 1]
 
-        # [1] 페이지에 삽입된 이미지 찾기
+        # [1] 그림 영역을 통째로 잘라낸다. 화면에 보이는 그대로가 담긴다.
+        area = _figure_rect(page)
+        if area is not None:
+            pix = page.get_pixmap(clip=area, matrix=fitz.Matrix(2, 2))
+            png = pix.tobytes("png")
+            ratio, _gray = _image_stats(png)
+            if ratio >= min_ink:
+                return png, "그림"
+
+        # [2] 영역을 잡지 못하면 삽입된 이미지에서 찾는다.
+        images = page.get_images(full=True)
+
+        # 다른 이미지의 투명도 마스크로 쓰이는 것들은 그림이 아니다.
+        # 목록의 두 번째 값이 그 이미지가 참조하는 마스크의 번호다.
+        mask_refs = {img[1] for img in images if len(img) > 1 and img[1]}
+
         best = None
-        for img in page.get_images(full=True):
+        for img in images:
             xref = img[0]
+
+            if xref in mask_refs:
+                continue
+
             try:
                 info = doc.extract_image(xref)
             except Exception:
@@ -241,8 +361,19 @@ def extract_page_image(pdf_bytes, page_no, min_size=180, min_ink=0.04,
             if info.get("width", 0) < min_size or info.get("height", 0) < min_size:
                 continue
 
-            # 테두리만 있는 빈 상자 등 내용이 없는 이미지는 제외한다.
-            if _ink_ratio(info["image"]) < min_ink:
+            # 흑백 1비트 이미지는 대부분 마스크다.
+            if info.get("bpc", 8) == 1:
+                continue
+
+            ratio, is_gray = _image_stats(info["image"])
+
+            # 테두리만 있는 빈 상자
+            if ratio < min_ink:
+                continue
+
+            # 색이 없으면서 화면이 거의 다 채워진 것은 투명도 마스크다.
+            # 컬러 사진은 흰색 아닌 픽셀이 대부분이므로 이 조건에 걸리지 않는다.
+            if is_gray and ratio > max_ink:
                 continue
 
             area = info["width"] * info["height"]
@@ -274,7 +405,7 @@ def extract_page_image(pdf_bytes, page_no, min_size=180, min_ink=0.04,
 # ============================================================
 def _text(slide, left, top, width, height, content,
           size=14, bold=False, color=TEXT, align=PP_ALIGN.LEFT,
-          anchor=MSO_ANCHOR.TOP, spacing=1.0):
+          anchor=MSO_ANCHOR.TOP, spacing=1.0, font=FONT):
     box = slide.shapes.add_textbox(Inches(left), Inches(top),
                                    Inches(width), Inches(height))
     frame = box.text_frame
@@ -288,7 +419,7 @@ def _text(slide, left, top, width, height, content,
     p.line_spacing = spacing
     run = p.add_run()
     run.text = content
-    run.font.name = FONT
+    run.font.name = font
     run.font.size = Pt(size)
     run.font.bold = bold
     run.font.color.rgb = color
@@ -433,6 +564,115 @@ def _image_slide(prs, index, data, image_bytes, kind):
     _footer(slide, data["source"])
 
 
+def _code_slide(prs, index, data):
+    """코드형 — 왼쪽 설명, 오른쪽 코드 블록."""
+    slide = _blank(prs)
+    _header(slide, index, data["title"], data["lead"])
+
+    lines = data["code"].splitlines()[:14]
+    bullets = data["bullets"][:3]
+
+    # 설명이 없으면 코드를 넓게 쓴다.
+    code_x, code_w = (6.9, 5.85) if bullets else (0.62, 12.1)
+
+    top = 2.45
+    for bullet in bullets:
+        _rect(slide, 0.62, top, 6.0, 0.92, WHITE, line=LINE)
+        _rect(slide, 0.62, top, 0.055, 0.92, AMBER, shape=MSO_SHAPE.RECTANGLE)
+        _text(slide, 0.92, top + 0.06, 5.5, 0.8, bullet, size=12,
+              color=TEXT, anchor=MSO_ANCHOR.MIDDLE, spacing=1.15)
+        top += 1.05
+
+    # 코드 블록. 어두운 바탕에 고정폭 글꼴을 쓴다.
+    height = min(4.1, 0.34 + 0.235 * max(len(lines), 1))
+    _rect(slide, code_x, 2.45, code_w, height, NAVY_DARK)
+
+    y = 2.58
+    for line in lines:
+        # 코드는 고정폭 글꼴이어야 들여쓰기가 어긋나지 않는다.
+        _text(slide, code_x + 0.22, y, code_w - 0.44, 0.24,
+              line if line.strip() else " ", size=10.5, color=ICE, font=MONO)
+        y += 0.235
+
+    _footer(slide, data["source"])
+
+
+def _compare_slide(prs, index, data):
+    """비교형 — 좌우 두 열로 나눠 마주 보게 둔다."""
+    slide = _blank(prs)
+    _header(slide, index, data["title"], data["lead"])
+
+    pairs = []
+    for bullet in data["bullets"][:4]:
+        left, _, right = bullet.partition("|")
+        pairs.append((left.strip(), right.strip()))
+
+    top = 2.5
+    for i, (left, right) in enumerate(pairs):
+        _rect(slide, 0.62, top, 5.9, 1.0, WHITE, line=LINE)
+        _rect(slide, 0.62, top, 0.055, 1.0, NAVY, shape=MSO_SHAPE.RECTANGLE)
+        _text(slide, 0.92, top + 0.08, 5.4, 0.84, left, size=12.5,
+              color=TEXT, anchor=MSO_ANCHOR.MIDDLE, spacing=1.2)
+
+        if right:
+            _rect(slide, 6.85, top, 5.9, 1.0, ICE_LIGHT, line=ICE)
+            _rect(slide, 6.85, top, 0.055, 1.0, AMBER, shape=MSO_SHAPE.RECTANGLE)
+            _text(slide, 7.15, top + 0.08, 5.4, 0.84, right, size=12.5,
+                  color=TEXT, anchor=MSO_ANCHOR.MIDDLE, spacing=1.2)
+
+        if i < len(pairs) - 1:
+            top += 1.12
+        else:
+            top += 1.0
+
+    _footer(slide, data["source"])
+
+
+def _step_slide(prs, index, data):
+    """절차형 — 번호를 크게 두고 세로로 이어지게 둔다."""
+    slide = _blank(prs)
+    _header(slide, index, data["title"], data["lead"])
+
+    steps = data["bullets"][:4]
+    if not steps:
+        return
+
+    area_top, area_bottom = 2.45, 6.45
+    card_h = 0.9
+    gap = 0.26
+    total = len(steps) * card_h + (len(steps) - 1) * gap
+    top = area_top + (area_bottom - area_top - total) / 2
+
+    for i, step in enumerate(steps, start=1):
+        _rect(slide, 1.35, top, 11.4, card_h, WHITE, line=LINE)
+
+        # 번호를 원으로 크게 표시해 순서를 드러낸다.
+        circle = _rect(slide, 0.62, top + (card_h - 0.62) / 2, 0.62, 0.62,
+                       NAVY, shape=MSO_SHAPE.OVAL)
+        frame = circle.text_frame
+        frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        p = frame.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        run = p.add_run()
+        run.text = str(i)
+        run.font.name = FONT
+        run.font.size = Pt(14)
+        run.font.bold = True
+        run.font.color.rgb = WHITE
+
+        _text(slide, 1.65, top + 0.08, 10.8, card_h - 0.16, step, size=13.5,
+              color=TEXT, anchor=MSO_ANCHOR.MIDDLE, spacing=1.2)
+
+        # 다음 단계로 이어지는 선
+        if i < len(steps):
+            _rect(slide, 0.91, top + card_h + 0.06, 0.04, gap - 0.12,
+                  ICE, shape=MSO_SHAPE.RECTANGLE)
+
+        top += card_h + gap
+
+    _footer(slide, data["source"])
+
+
 def _card_slide(prs, index, data):
     """그림이 없을 때 — 본문을 카드 격자로 배치해 여백을 채운다."""
     slide = _blank(prs)
@@ -533,23 +773,26 @@ def _closing_slide(prs, topic):
 # ============================================================
 # 6. 전체 조립
 # ============================================================
+# 그림을 무엇으로 채울지 정하는 방식
+IMAGE_MODE_DIAGRAM = "자료 도표 우선"      # 기본. 자료에 있는 그림이 곧 근거다
+IMAGE_MODE_ILLUST = "AI 삽화 우선"         # 도표가 있어도 삽화를 만든다
+IMAGE_MODE_NONE = "자료 그림만"            # 삽화를 만들지 않는다
+
+IMAGE_MODES = (IMAGE_MODE_DIAGRAM, IMAGE_MODE_ILLUST, IMAGE_MODE_NONE)
+
+
 def build_pptx(topic, slides, pdf_store=None, log=None,
-               use_illustration=False, progress=None):
+               image_mode=IMAGE_MODE_NONE, progress=None):
     """슬라이드 목록을 pptx 파일(바이트)로 만들어 반환한다.
 
-    pdf_store        : {파일명: PDF 바이트} — 근거 페이지의 그림을 가져오는 데 사용한다.
-    log              : 슬라이드별 처리 결과를 담을 리스트 (선택).
-    use_illustration : 자료에 도표가 없을 때 AI 삽화를 만들지 여부.
-    progress         : 진행 상황을 알리는 함수 (선택). progress(현재, 전체, 설명)
+    pdf_store  : {파일명: PDF 바이트} — 근거 페이지의 그림을 가져오는 데 사용한다.
+    log        : 슬라이드별 처리 결과를 담을 리스트 (선택).
+    image_mode : 그림을 무엇으로 채울지. IMAGE_MODES 중 하나.
+    progress   : 진행 상황을 알리는 함수 (선택). progress(현재, 전체, 설명)
 
-    그림 우선순위
-      1. 자료에 실제로 삽입된 도표
-      2. AI 삽화 (옵션이 켜져 있을 때)
-      3. 근거 페이지 썸네일
-      4. 아무것도 없으면 카드형 레이아웃
-
-    도표를 가장 먼저 찾는 이유는, 자료에 있는 그림이 곧 근거이기 때문이다.
+    기본값이 '자료 도표 우선'인 이유는 자료에 있는 그림이 곧 근거이기 때문이다.
     AI 삽화는 근거가 아니라 장식이므로 슬라이드에 'AI 생성'이라고 표시한다.
+    어떤 방식이든 마지막에는 근거 페이지 썸네일, 그다음 카드형으로 물러난다.
     """
     prs = Presentation()
     prs.slide_width = Inches(SLIDE_W)
@@ -569,32 +812,41 @@ def build_pptx(topic, slides, pdf_store=None, log=None,
         file_name, page_no = _parse_source(data.get("source", ""))
         has_pdf = bool(pdf_store and file_name and page_no and file_name in pdf_store)
 
-        # [1] 자료에 실제로 삽입된 도표를 먼저 찾는다. 이것이 근거다.
-        if has_pdf:
-            image_bytes, kind = extract_page_image(
-                pdf_store[file_name], page_no, allow_page_render=False
-            )
-            if image_bytes:
-                note = "자료 도표 사용"
-
-        # [2] 도표가 없을 때만 삽화를 만든다.
-        if image_bytes is None and use_illustration:
+        def make_illustration():
+            """AI 삽화를 만든다. (이미지, 종류, 설명)"""
             if progress:
                 progress(i, total, f"{i}번째 슬라이드 삽화 생성 중")
-
             try:
                 from imagegen import generate_illustration
-                image_bytes, error = generate_illustration(
-                    data["title"], data["bullets"]
-                )
-                if image_bytes:
-                    kind = "삽화"
-                    note = "AI 삽화 생성"
-                else:
-                    note = f"삽화 실패 — {error}"
+                img, error = generate_illustration(data["title"], data["bullets"])
+                if img:
+                    return img, "삽화", "AI 삽화 생성"
+                return None, None, f"삽화 실패 — {error}"
             except Exception as e:
-                image_bytes, kind = None, None
-                note = f"삽화 실패 — {type(e).__name__}"
+                return None, None, f"삽화 실패 — {type(e).__name__}"
+
+        def find_diagram():
+            """자료에 실제로 삽입된 도표를 찾는다. 이것이 근거다."""
+            if not has_pdf:
+                return None, None, ""
+            img, k = extract_page_image(pdf_store[file_name], page_no,
+                                        allow_page_render=False)
+            return (img, k, "자료 도표 사용") if img else (None, None, "")
+
+        # 선택한 방식에 따라 순서를 바꾼다.
+        if image_mode == IMAGE_MODE_ILLUST:
+            steps = [make_illustration, find_diagram]
+        elif image_mode == IMAGE_MODE_DIAGRAM:
+            steps = [find_diagram, make_illustration]
+        else:
+            steps = [find_diagram]
+
+        for step in steps:
+            image_bytes, kind, message = step()
+            if message:
+                note = (note + " / " + message).strip(" /")
+            if image_bytes:
+                break
 
         # [3] 그래도 없으면 근거 페이지 썸네일을 쓴다.
         if image_bytes is None and has_pdf:
@@ -607,8 +859,15 @@ def build_pptx(topic, slides, pdf_store=None, log=None,
         if log is not None:
             log.append(f"{i}. {data['title']} — {note or '그림 없음 (카드형)'}")
 
-        if image_bytes:
+        # 코드는 그림보다 코드 자체를 보여주는 편이 낫다.
+        if data.get("type") == "코드" and data.get("code"):
+            _code_slide(prs, i, data)
+        elif image_bytes:
             _image_slide(prs, i, data, image_bytes, kind)
+        elif data.get("type") == "절차":
+            _step_slide(prs, i, data)
+        elif data.get("type") == "비교":
+            _compare_slide(prs, i, data)
         else:
             _card_slide(prs, i, data)
 
