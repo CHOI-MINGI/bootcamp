@@ -122,7 +122,7 @@ def delete_document(vectorstore, file_name, library, pdf_store):
     # 남은 자료가 없으면 인덱스도 통째로 지운다.
     if not library:
         clear_index()
-        remote.upload()
+        remote.upload(prune=True)
         return None, [], {}
 
     removed = _remove_file_vectors(vectorstore, file_name)
@@ -134,7 +134,8 @@ def delete_document(vectorstore, file_name, library, pdf_store):
         vectorstore.save_local(INDEX_DIR)
         _save_library(library)
 
-    remote.upload()
+    # 자료를 지웠으므로 버킷에서도 없애야 한다. 이때만 전체를 대조한다.
+    remote.upload(prune=True)
     return vectorstore, library, pdf_store
 
 

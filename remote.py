@@ -82,8 +82,14 @@ def download():
         return 0, f"{type(e).__name__}: {e}"
 
 
-def upload():
+def upload(paths=None, prune=False):
     """로컬 data 폴더의 내용을 버킷으로 올린다.
+
+    paths : 올릴 파일 경로 목록. 지정하면 그것만 올린다.
+            사용자 한 명을 추가하는 작업에 폴더 전체를 훑을 이유가 없다.
+    prune : 로컬에 없는 파일을 버킷에서 지울지 여부.
+            버킷 전체를 훑어야 하므로 자료를 삭제했을 때만 켠다.
+            켜지 않으면 지운 자료가 재시작 때 되살아난다.
 
     반환: (올린 파일 수, 오류 메시지)
     """
@@ -98,20 +104,33 @@ def upload():
         count = 0
         local_names = set()
 
-        for root, _dirs, files in os.walk(DATA_DIR):
-            for name in files:
-                local_path = os.path.join(root, name)
-                blob_path = _blob_path(local_path)
-                local_names.add(blob_path)
+        if paths is None:
+            targets = []
+            for root, _dirs, files in os.walk(DATA_DIR):
+                targets.extend(os.path.join(root, f) for f in files)
+        else:
+            targets = [p for p in paths if os.path.isfile(p)]
 
-                bucket.blob(blob_path).upload_from_filename(local_path)
-                count += 1
+        for local_path in targets:
+            blob_path = _blob_path(local_path)
+            local_names.add(blob_path)
 
-        # 로컬에서 지운 파일은 버킷에서도 지운다.
-        # 이렇게 하지 않으면 삭제한 자료가 재시작 때 되살아난다.
-        for blob in bucket.list_blobs(prefix=_prefix() + "/"):
-            if blob.name not in local_names:
-                blob.delete()
+            # 크기가 같으면 이미 올라간 것으로 보고 건너뛴다.
+            # 내용까지 대조하려면 해시를 계산해야 하는데, 그 비용이 더 크다.
+            try:
+                existing = bucket.get_blob(blob_path)
+                if existing and existing.size == os.path.getsize(local_path):
+                    continue
+            except Exception:
+                pass
+
+            bucket.blob(blob_path).upload_from_filename(local_path)
+            count += 1
+
+        if prune:
+            for blob in bucket.list_blobs(prefix=_prefix() + "/"):
+                if blob.name not in local_names:
+                    blob.delete()
 
         return count, None
 

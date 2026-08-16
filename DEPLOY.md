@@ -4,6 +4,19 @@
 
 ---
 
+## 배포 전 확인 목록
+
+| | 항목 |
+|---|---|
+| ☐ | `python check_models.py` 로 설정된 모델이 실제 호출되는지 확인 |
+| ☐ | `dir -Force` 로 `.env` 와 `.streamlit/secrets.toml` 이 커밋 대상이 아닌지 확인 |
+| ☐ | **운영 전환 시 `TEST_ACCOUNTS` 제거** — 아이디·비밀번호 로그인은 시연·평가 전용이다. 운영 환경에 남겨두면 학내 SSO를 우회하는 통로가 된다 |
+| ☐ | 운영 전환 시 `--allow-unauthenticated` 제거 또는 접근 제한 검토 |
+| ☐ | `LOG_QUESTIONS` · `LOG_RETENTION_DAYS` 를 기관 개인정보 정책에 맞게 설정 |
+| ☐ | 예산 알림 또는 지출 상한 설정 |
+
+---
+
 ## 0. 준비
 
 | 항목 | 내용 |

@@ -15,12 +15,55 @@ load_dotenv()
 SIMILARITY_THRESHOLD = 0.7          # 이 거리보다 멀면 차단
 REFUSAL_MESSAGE = "제공된 자료에서 해당 내용을 찾을 수 없습니다."
 
-# 권한 필터링을 거치면 검색 후보가 줄어들기 때문에,
-# 먼저 넉넉히 가져온 뒤 걸러내고 상위 k개만 사용한다.
-FETCH_K = 30
+# 검색 후보 수.
+#
+# 권한으로 걸러내면 후보가 줄어들기 때문에 넉넉히 가져와야 한다.
+# 고정값을 쓰면 자료가 많아졌을 때, 사용자가 볼 수 있는 자료가
+# 전역 상위 후보 안에 들지 못해 "답할 수 있는데도 차단"되는 일이 생긴다.
+# 그래서 코퍼스 규모에 따라 후보 수를 늘린다.
+FETCH_K_MIN = 30
+FETCH_K_MAX = 400
+FETCH_K_RATIO = 20        # 전체 청크의 1/20 정도를 후보로 본다
+
+
+def fetch_k_for(vectorstore):
+    """코퍼스 규모에 맞는 검색 후보 수를 정한다."""
+    try:
+        total = vectorstore.index.ntotal
+    except Exception:
+        return FETCH_K_MIN
+
+    return max(FETCH_K_MIN, min(FETCH_K_MAX, total // FETCH_K_RATIO))
 
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gemini-3.6-flash")
+
+
+# ------------------------------------------------------------
+# 모델 인스턴스
+# ------------------------------------------------------------
+# temperature를 기능마다 다르게 둔다.
+#   0.0  질의응답 — 같은 질문에 같은 답이 나와야 한다. 자료를 옮겨 적는 일에 가깝다.
+#   0.3  자료 생성 — 문항 다섯 개가 전부 같은 문장으로 나오면 쓸 수 없다.
+#        표현에만 폭을 주는 정도이며, 근거는 여전히 자료로 제한된다.
+#
+# 주의: gemini-3.6-flash는 샘플링 값이 고정되어 있어 이 설정을 무시한다.
+# 값을 바꿔도 결과가 달라지지 않으므로, 표현 다양성이 필요하면 모델을 바꿔야 한다.
+# 그래도 설정을 남겨 두는 이유는 다른 모델로 교체했을 때 의도가 그대로 적용되도록 하기 위해서다.
+QA_TEMPERATURE = 0.0
+GENERATION_TEMPERATURE = 0.3
+
+# 클라이언트 생성에도 비용이 든다. 같은 설정이면 만들어 둔 것을 다시 쓴다.
+_llm_cache = {}
+
+
+def get_llm(temperature=QA_TEMPERATURE, model=None):
+    key = (model or CHAT_MODEL, temperature)
+
+    if key not in _llm_cache:
+        _llm_cache[key] = ChatGoogleGenerativeAI(model=key[0], temperature=key[1])
+
+    return _llm_cache[key]
 
 
 # ------------------------------------------------------------
@@ -130,8 +173,7 @@ def create_rag_chain():
     [Answer in Korean:] """
 
     prompt = ChatPromptTemplate.from_template(template)
-    llm = ChatGoogleGenerativeAI(model=CHAT_MODEL, temperature=0)
-    return prompt | llm | StrOutputParser()
+    return prompt | get_llm(QA_TEMPERATURE) | StrOutputParser()
 
 
 # ============================================================
@@ -169,15 +211,34 @@ def _search(vectorstore, query, role, courses, k):
     반환: (docs, best_score, blocked_result)
     blocked_result가 None이 아니면 그대로 사용자에게 돌려주면 된다.
     """
-    results = vectorstore.similarity_search_with_score(query, k=FETCH_K)
+    fetch_k = fetch_k_for(vectorstore)
+
+    # 권한 조건을 검색 호출에 함께 넘긴다.
+    # 검색 결과를 받아 걸러내는 것이 아니라, 검색 단계에서 후보를 좁히므로
+    # 볼 수 없는 자료가 후보 자리를 차지하지 않는다.
+    def permitted(metadata):
+        return is_allowed(metadata, role, courses)
+
+    try:
+        results = vectorstore.similarity_search_with_score(
+            query, k=k, filter=permitted, fetch_k=fetch_k
+        )
+        prefiltered = True
+    except TypeError:
+        # 설치된 버전이 filter 인자를 받지 않으면 예전 방식으로 되돌린다.
+        results = vectorstore.similarity_search_with_score(query, k=fetch_k)
+        prefiltered = False
 
     if not results:
         return None, None, _refuse("검색 결과 없음", None)
 
-    # [1] 권한 선필터링 — 볼 수 없는 자료는 검색 단계에서 제외한다.
+    # [1] 권한 필터링 — 검색 단계에서 못 걸렀다면 여기서 걸러낸다.
     total = len(results)
-    allowed = [(doc, score) for doc, score in results
-               if is_allowed(doc.metadata, role, courses)]
+    if prefiltered:
+        allowed = list(results)
+    else:
+        allowed = [(doc, score) for doc, score in results
+                   if is_allowed(doc.metadata, role, courses)]
     removed = total - len(allowed)
 
     if not allowed:
@@ -299,7 +360,7 @@ def rewrite_question(question, history, llm=None):
 
     try:
         prompt = ChatPromptTemplate.from_template(REWRITE_TEMPLATE)
-        llm = llm or ChatGoogleGenerativeAI(model=CHAT_MODEL, temperature=0)
+        llm = llm or get_llm(QA_TEMPERATURE)
         chain = prompt | llm | StrOutputParser()
 
         rewritten = chain.invoke({
@@ -432,8 +493,7 @@ def generate(vectorstore, task, role="학습자", courses=(), k=5,
     instruction = (template or TASK_PROMPTS[task]).format(**params)
 
     prompt = ChatPromptTemplate.from_template(GENERATION_TEMPLATE)
-    llm = ChatGoogleGenerativeAI(model=CHAT_MODEL, temperature=0.3)
-    chain = prompt | llm | StrOutputParser()
+    chain = prompt | get_llm(GENERATION_TEMPERATURE) | StrOutputParser()
 
     try:
         answer = chain.invoke({

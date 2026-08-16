@@ -53,7 +53,9 @@ def save(users):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(USERS_PATH, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
-    remote.upload()
+
+    # 명부 파일 하나만 올린다. 사용자 한 명 추가에 자료 전체를 훑을 이유가 없다.
+    remote.upload(paths=[USERS_PATH])
 
 
 def _seed_from_env():

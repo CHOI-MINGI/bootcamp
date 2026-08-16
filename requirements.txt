@@ -13,3 +13,4 @@ python-docx              # DOCX 읽기
 olefile                  # HWP 읽기
 faiss-cpu                # 벡터 검색
 google-cloud-storage     # 배포 환경에서 자료·인덱스 영속화
+google-genai             # 슬라이드 AI 삽화 생성

@@ -223,11 +223,16 @@ def require_login():
 
 
 def logout():
-    """로그아웃한다."""
+    """로그아웃한다.
+
+    세션을 비운 뒤에도 스크립트가 계속 실행되면 이미 지워진 값을 읽다가 오류가 난다.
+    st.rerun()은 즉시 실행을 중단하지만 st.logout()은 그렇지 않아, 뒤에 st.stop()을 둔다.
+    """
     mode = st.session_state.get("auth_mode")
     st.session_state.clear()
 
     if mode == "구글":
         st.logout()
+        st.stop()
     else:
         st.rerun()

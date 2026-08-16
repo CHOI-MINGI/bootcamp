@@ -4,12 +4,27 @@ import re
 import time
 import uuid
 
-# 배포 환경에서는 .env 파일이 없고 API 키를 플랫폼이 따로 관리한다.
-# Streamlit Secrets에 키가 있으면 환경변수로 옮겨, 로컬(.env)과 같은 방식으로 읽히게 한다.
+# 배포 환경에서는 .env 파일이 없고 설정을 플랫폼이 따로 관리한다.
+# Streamlit Secrets에 값이 있으면 환경변수로 옮겨, 로컬(.env)과 같은 방식으로 읽히게 한다.
 # 다른 모듈을 불러오기 전에 처리해야 한다.
+#
+# 전부 옮기지 않고 필요한 항목만 지정한다.
+# OAuth 클라이언트 시크릿이나 쿠키 시크릿까지 환경변수에 올려두면,
+# 나중에 환경변수를 통째로 출력하는 코드가 실수로 들어갔을 때 그대로 새어나간다.
+_ENV_KEYS = (
+    "GOOGLE_API_KEY", "GEMINI_API_KEY",
+    "CHAT_MODEL", "EMBEDDING_MODEL",
+    "ADMIN_EMAILS", "PROFESSOR_EMAILS", "COURSE_MAP", "DEFAULT_COURSES",
+    "ALLOWED_EMAIL_DOMAIN", "TEST_ACCOUNTS",
+    "GCS_BUCKET", "GCS_PREFIX",
+    "LOG_QUESTIONS", "LOG_RETENTION_DAYS", "OCR_ENABLED",
+    "IMAGE_MODEL", "IMAGE_ENABLED",
+)
+
 try:
-    for _key, _value in st.secrets.items():
-        os.environ.setdefault(_key, str(_value))
+    for _key in _ENV_KEYS:
+        if _key in st.secrets:
+            os.environ.setdefault(_key, str(st.secrets[_key]))
 except Exception:
     # Secrets가 설정되지 않은 로컬 환경에서는 그냥 넘어간다.
     pass
@@ -42,7 +57,11 @@ auth.require_login()
 
 
 # 세션 상태 초기화
+# 로그아웃 직후처럼 세션이 비워진 채로 이 아래 코드가 실행될 수 있으므로
+# 필요한 항목을 먼저 만들어 둔다.
 st.session_state.setdefault("messages", [])
+st.session_state.setdefault("library", [])
+st.session_state.setdefault("pdf_store", {})
 
 # 디스크에 저장된 자료를 불러온다. 앱을 다시 켜도 등록 자료가 유지된다.
 if "vectorstore" not in st.session_state:
@@ -149,9 +168,14 @@ def upload_panel():
                 st.session_state.pdf_store[uploaded_file.name] = pdf_bytes
                 st.success(f"{uploaded_file.name} — {len(docs)}개 청크")
 
+            except ValueError as e:
+                # 형식 미지원·본문 없음처럼 사용자가 바로 이해할 수 있는 오류는
+                # 그대로 보여주는 편이 도움이 된다.
+                st.error(f"{uploaded_file.name} — {e}")
+
             except Exception as e:
-                st.error(f"{uploaded_file.name} 분석 실패")
-                st.caption(f"원인: {e}")
+                # 그 외에는 질의응답 경로와 같은 방식으로 다듬어 보여준다.
+                st.error(f"{uploaded_file.name} — {friendly_error(e)}")
 
             finally:
                 if os.path.exists(temp_path):
@@ -165,7 +189,8 @@ def upload_panel():
 
 def library_panel():
     """등록된 자료 목록. 학습자에게도 어떤 자료가 있는지 보여준다."""
-    if not st.session_state.library:
+    # 로그아웃 직후처럼 세션이 비워진 상태로 들어올 수 있어 get으로 읽는다.
+    if not st.session_state.get("library"):
         return
 
     st.divider()
@@ -608,8 +633,15 @@ if VIEW == "교수자":
         ui.section("강의 슬라이드 생성",
                    "자료를 근거로 슬라이드를 구성하고 PPTX 파일로 내려받습니다.")
         topic = st.text_input("주제", key="slide_topic", placeholder="예: 옴의 법칙")
-        count = st.number_input("슬라이드 수", 1, 10, 5, key="slide_count")
-        st.caption("슬라이드의 그림은 업로드한 자료의 도표와 페이지에서 가져옵니다.")
+        c1, c2 = st.columns([1, 2])
+        count = c1.number_input("슬라이드 수", 1, 10, 5, key="slide_count")
+        use_illust = c2.checkbox(
+            "도표가 없는 슬라이드에 AI 삽화 넣기",
+            key="slide_illust",
+            help="자료에 도표가 있으면 그것을 먼저 사용합니다. "
+                 "생성된 삽화에는 'AI 생성' 표시가 붙으며, 근거로 쓰이지 않습니다.",
+        )
+        st.caption("슬라이드의 그림은 기본적으로 업로드한 자료의 도표와 페이지에서 가져옵니다.")
         extra, _ = prompt_controls("slide")
 
         if st.button("슬라이드 생성", key="slide_btn", type="primary"):
@@ -641,13 +673,20 @@ if VIEW == "교수자":
                 # 다운로드 버튼 안에서 만들면 화면이 갱신될 때마다 파일이 다시 만들어진다.
                 if not result["blocked"] and result.get("slides"):
                     build_log = []
+                    status = st.empty()
+
+                    def report(current, total, message):
+                        status.caption(f"{message} ({current}/{total})")
 
                     with st.spinner("PPTX 파일을 만드는 중입니다..."):
                         st.session_state.pptx_bytes = build_pptx(
                             topic, result["slides"],
                             st.session_state.pdf_store,
                             log=build_log,
+                            use_illustration=use_illust,
+                            progress=report if use_illust else None,
                         )
+                    status.empty()
                     st.session_state.slide_log = build_log
 
         result = st.session_state.get("slide_result")

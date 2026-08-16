@@ -249,19 +249,29 @@ def _group(blocks):
     buffer = []
     length = 0
 
-    for block in blocks:
-        buffer.append(block)
-        length += len(block)
-
-        if length >= CHARS_PER_UNIT:
+    def flush():
+        nonlocal buffer, length
+        if buffer:
             docs.append(Document(page_content="\n".join(buffer),
                                  metadata={"page": len(docs)}))
             buffer, length = [], 0
 
-    if buffer:
-        docs.append(Document(page_content="\n".join(buffer),
-                             metadata={"page": len(docs)}))
+    for block in blocks:
+        # 줄바꿈 없이 아주 길게 이어진 문단은 그대로 두면 통째로 한 구간이 된다.
+        # 그러면 출처가 "구간 1" 하나로 뭉뚱그려지므로 미리 잘라 준다.
+        while len(block) > CHARS_PER_UNIT:
+            flush()
+            docs.append(Document(page_content=block[:CHARS_PER_UNIT],
+                                 metadata={"page": len(docs)}))
+            block = block[CHARS_PER_UNIT:]
 
+        buffer.append(block)
+        length += len(block)
+
+        if length >= CHARS_PER_UNIT:
+            flush()
+
+    flush()
     return docs
 
 

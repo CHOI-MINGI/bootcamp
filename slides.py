@@ -22,10 +22,9 @@ from pptx.oxml.ns import qn
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from rag_module import (_search, _build_context, _build_sources,
-                        _format_extra, _failed, CHAT_MODEL)
+                        _format_extra, _failed, get_llm)
 
 
 # ============================================================
@@ -118,8 +117,8 @@ def generate_slide_data(vectorstore, topic, count=5, role="교수자", courses=(
         return blocked
 
     prompt = ChatPromptTemplate.from_template(SLIDE_TEMPLATE)
-    llm = ChatGoogleGenerativeAI(model=CHAT_MODEL, temperature=0.2)
-    chain = prompt | llm | StrOutputParser()
+    # 슬라이드는 JSON 형식을 지켜야 하므로 생성 기능 중 가장 낮은 값을 쓴다.
+    chain = prompt | get_llm(0.2) | StrOutputParser()
 
     try:
         raw = chain.invoke({
@@ -426,6 +425,7 @@ def _image_slide(prs, index, data, image_bytes, kind):
     label = {
         "그림": "자료에서 가져온 도표",
         "페이지": "근거 페이지 미리보기",
+        "삽화": "AI 생성",
     }.get(kind, "")
     _text(slide, frame_left, frame_top + frame_h + 0.12, frame_w, 0.3,
           label, size=9, color=GRAY, align=PP_ALIGN.CENTER)
@@ -533,19 +533,23 @@ def _closing_slide(prs, topic):
 # ============================================================
 # 6. 전체 조립
 # ============================================================
-def build_pptx(topic, slides, pdf_store=None, log=None):
+def build_pptx(topic, slides, pdf_store=None, log=None,
+               use_illustration=False, progress=None):
     """슬라이드 목록을 pptx 파일(바이트)로 만들어 반환한다.
 
-    pdf_store : {파일명: PDF 바이트} — 근거 페이지의 그림을 가져오는 데 사용한다.
-    log       : 슬라이드별 처리 결과를 담을 리스트 (선택).
+    pdf_store        : {파일명: PDF 바이트} — 근거 페이지의 그림을 가져오는 데 사용한다.
+    log              : 슬라이드별 처리 결과를 담을 리스트 (선택).
+    use_illustration : 자료에 도표가 없을 때 AI 삽화를 만들지 여부.
+    progress         : 진행 상황을 알리는 함수 (선택). progress(현재, 전체, 설명)
 
     그림 우선순위
       1. 자료에 실제로 삽입된 도표
-      2. 근거 페이지 썸네일
-      3. 둘 다 없으면 카드형 레이아웃
+      2. AI 삽화 (옵션이 켜져 있을 때)
+      3. 근거 페이지 썸네일
+      4. 아무것도 없으면 카드형 레이아웃
 
-    그림은 모두 자료에서 가져온다. AI로 이미지를 생성하지 않는 이유는
-    자료에 없는 그림을 강의자료에 넣으면 '근거 기반'이라는 설계 원칙이 깨지기 때문이다.
+    도표를 가장 먼저 찾는 이유는, 자료에 있는 그림이 곧 근거이기 때문이다.
+    AI 삽화는 근거가 아니라 장식이므로 슬라이드에 'AI 생성'이라고 표시한다.
     """
     prs = Presentation()
     prs.slide_width = Inches(SLIDE_W)
@@ -556,6 +560,8 @@ def build_pptx(topic, slides, pdf_store=None, log=None):
     if len(slides) >= 3:
         _agenda_slide(prs, slides)
 
+    total = len(slides)
+
     for i, data in enumerate(slides, start=1):
         image_bytes, kind = None, None
         note = ""
@@ -563,7 +569,7 @@ def build_pptx(topic, slides, pdf_store=None, log=None):
         file_name, page_no = _parse_source(data.get("source", ""))
         has_pdf = bool(pdf_store and file_name and page_no and file_name in pdf_store)
 
-        # [1] 자료에 실제로 삽입된 도표를 먼저 찾는다.
+        # [1] 자료에 실제로 삽입된 도표를 먼저 찾는다. 이것이 근거다.
         if has_pdf:
             image_bytes, kind = extract_page_image(
                 pdf_store[file_name], page_no, allow_page_render=False
@@ -571,13 +577,32 @@ def build_pptx(topic, slides, pdf_store=None, log=None):
             if image_bytes:
                 note = "자료 도표 사용"
 
-        # [2] 도표가 없으면 근거 페이지 썸네일을 쓴다.
+        # [2] 도표가 없을 때만 삽화를 만든다.
+        if image_bytes is None and use_illustration:
+            if progress:
+                progress(i, total, f"{i}번째 슬라이드 삽화 생성 중")
+
+            try:
+                from imagegen import generate_illustration
+                image_bytes, error = generate_illustration(
+                    data["title"], data["bullets"]
+                )
+                if image_bytes:
+                    kind = "삽화"
+                    note = "AI 삽화 생성"
+                else:
+                    note = f"삽화 실패 — {error}"
+            except Exception as e:
+                image_bytes, kind = None, None
+                note = f"삽화 실패 — {type(e).__name__}"
+
+        # [3] 그래도 없으면 근거 페이지 썸네일을 쓴다.
         if image_bytes is None and has_pdf:
             image_bytes, kind = extract_page_image(
                 pdf_store[file_name], page_no, allow_page_render=True
             )
             if image_bytes:
-                note = "페이지 썸네일 사용"
+                note = (note + " / 페이지 썸네일로 대체").strip(" /")
 
         if log is not None:
             log.append(f"{i}. {data['title']} — {note or '그림 없음 (카드형)'}")

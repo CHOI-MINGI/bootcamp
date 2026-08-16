@@ -83,6 +83,10 @@ server_metadata_url = "https://accounts.google.com/.well-known/openid-configurat
 구글 계정을 새로 만들기 어려운 평가·시연 상황을 위해 아이디/비밀번호 로그인을 함께 제공합니다.
 **가입 기능은 없습니다.** 서버가 발급한 계정만 쓸 수 있습니다.
 
+> **운영 전환 시에는 `TEST_ACCOUNTS` 를 제거해야 합니다.**
+> 이 경로가 남아 있으면 학내 SSO를 우회해 접속할 수 있는 통로가 됩니다.
+> 값을 비우거나 환경변수를 삭제하면 로그인 화면에서 해당 영역이 사라집니다.
+
 ```
 TEST_ACCOUNTS={"admin":{"password":"sha256:해시값","role":"관리자","courses":["EE201"]}}
 ```
