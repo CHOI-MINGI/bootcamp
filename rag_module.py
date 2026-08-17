@@ -1,4 +1,5 @@
 import os
+import re
 from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
@@ -143,6 +144,48 @@ def add_documents(vectorstore, documents):
     return vectorstore
 
 
+# 출처 표기를 찾아내는 규칙.
+# 뒤에 위치 정보(p.12 / 구간 3 / 슬라이드 5)가 붙은 대괄호만 출처로 본다.
+# 그래야 본문에 쓰인 다른 대괄호를 건드리지 않는다.
+CITATION_RE = re.compile(
+    r"[  ]*\[[^\[\]]{1,120}?(?:p\.\s*\d+|구간\s*\d+|슬라이드\s*\d+)\]"
+)
+
+
+def dedupe_citations(text):
+    """한 문단 안에서 같은 출처가 반복되면 마지막 하나만 남긴다.
+
+    자료가 한 덩어리로 잡히는 문서(구간 1뿐인 DOCX 등)에서는
+    모든 문장의 근거가 같은 출처가 된다. 그대로 두면 문장마다
+    같은 표기가 붙어 정작 읽어야 할 내용이 묻힌다.
+
+    출처를 지우는 것이 아니라 위치를 항목 끝으로 모으는 것이므로,
+    근거를 추적할 수 있다는 성질은 그대로 유지된다.
+    """
+    lines = []
+
+    for line in text.split("\n"):
+        found = CITATION_RE.findall(line)
+        if len(found) < 2:
+            lines.append(line)
+            continue
+
+        # 같은 표기가 여러 번 나오면 마지막 등장만 남긴다.
+        keep = {}
+        for i, cite in enumerate(found):
+            keep[cite.strip()] = i
+
+        seen = [-1]
+
+        def pick(match):
+            seen[0] += 1
+            return match.group(0) if keep[match.group(0).strip()] == seen[0] else ""
+
+        lines.append(CITATION_RE.sub(pick, line).rstrip())
+
+    return "\n".join(lines)
+
+
 def create_rag_chain():
     """질의응답용 프롬프트 + LLM 체인을 만든다. (문서와 무관하므로 1회만 생성)"""
     template = """You are an AI learning assistant for OO University, grounded in institutional course materials.
@@ -154,12 +197,22 @@ def create_rag_chain():
     [Rules]
     1. Never speculate about information not present in the context.
     2. If the evidence is insufficient, respond with exactly: "제공된 자료에서 해당 내용을 찾을 수 없습니다"
-    3. Cite the source after each key claim in the format [filename p.page].
+    3. Cite sources in the format [filename p.page], but place the citation at the
+       END of each paragraph or numbered item — not after every sentence.
+       NEVER repeat the same citation twice in a row. If an entire item comes from
+       one source, cite it once at the end of that item.
     4. Write your answer in Korean.
+    5. Do not use LaTeX or math markup. Write formulas as plain text, e.g. V = I × R.
 
     [Examples]
     Question: 옴의 법칙이란 무엇인가요?
-    Answer: 전압은 전류와 저항의 곱으로 표현됩니다. [회로이론_3주차.pdf p.12] 이때 저항은 도체의 재질과 단면적에 따라 결정됩니다. [회로이론_3주차.pdf p.13]
+    Answer: 전압은 전류와 저항의 곱으로 표현되며, V = I × R 로 씁니다. 이때 저항은 도체의 재질과 단면적에 따라 결정됩니다. [회로이론_3주차.pdf p.12]
+
+    Question: 회로 해석에 쓰이는 법칙을 알려주세요.
+    Answer: 강의 노트에서 다루는 법칙은 둘입니다.
+
+    1. **키르히호프 전류 법칙(KCL)** — 한 접점에 들어오는 전류의 합은 나가는 전류의 합과 같습니다. 전하가 접점에 쌓이지 않는다는 전하 보존에서 나온 법칙입니다. [회로이론_3주차.pdf p.12]
+    2. **키르히호프 전압 법칙(KVL)** — 닫힌 회로를 한 바퀴 돌며 전압 변화를 더하면 0이 됩니다. 출발점으로 돌아오면 전위가 원래대로 돌아와야 한다는 에너지 보존에서 나옵니다. [회로이론_3주차.pdf p.14]
 
     Question: 이번 학기 등록금은 얼마인가요?
     Answer: 제공된 자료에서 해당 내용을 찾을 수 없습니다
@@ -402,7 +455,7 @@ def ask(vectorstore, rag_chain, question, role="학습자", courses=(), k=3,
         return _failed(e)
 
     return {
-        "answer": answer,
+        "answer": dedupe_citations(answer),
         "sources": _build_sources(docs),
         "blocked": False,
         "reason": None,
@@ -505,7 +558,7 @@ def generate(vectorstore, task, role="학습자", courses=(), k=5,
         return _failed(e)
 
     return {
-        "answer": answer,
+        "answer": dedupe_citations(answer),
         "sources": _build_sources(docs),
         "blocked": False,
         "reason": None,
