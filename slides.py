@@ -89,7 +89,7 @@ SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
 2. 반드시 JSON 배열만 출력하십시오. 설명 문장, 인사말, 코드블록 표시를 붙이지 마십시오.
 3. 각 슬라이드는 다음 형식을 따르십시오.
    {{"type": "개념", "title": "슬라이드 제목", "lead": "한 줄 요약",
-     "bullets": ["문장1", "문장2"], "code": "", "diagram": null,
+     "bullets": ["문장1", "문장2"], "code": "", "diagram": null, "stat": null,
      "source": "파일명 p.페이지"}}
 4. type은 내용의 성격에 따라 아래 넷 중 하나로 정하십시오.
    개념  무엇인지 설명하는 내용
@@ -116,10 +116,15 @@ SLIDE_TEMPLATE = """당신은 OO대학교의 강의자료 작성 AI입니다.
    설명이 필요 없으면 빈 문자열로 두고, 8자를 넘기지 마십시오.
    자료에 없는 관계를 지어내서는 안 됩니다. 다만 자료에 있는 관계를 그냥 넘기지도 마십시오.
    관계를 정말 찾을 수 없을 때만 null로 두십시오.
-10. source에는 그 슬라이드의 근거가 된 출처를 '파일명 p.숫자' 형식으로 정확히 적으십시오.
-11. 같은 type이 연속으로 두 번 나오지 않게 구성하십시오.
-12. type이 "개념"인 슬라이드는 전체의 절반을 넘기지 마십시오.
-13. 모든 내용은 한국어로 작성하십시오.
+10. stat은 자료에 그 슬라이드를 대표하는 수치가 있을 때만 채웁니다.
+    {{"value": "0.7", "label": "이 값을 넘으면 답하지 않는다"}}
+    value는 자료에 실제로 적힌 숫자여야 하며 6자를 넘기지 마십시오. 단위는 붙여도 됩니다.
+    label은 그 숫자가 무엇을 뜻하는지 24자 이내로 적으십시오.
+    수치를 지어내서는 안 됩니다. 대표할 숫자가 없으면 null로 두십시오.
+11. source에는 그 슬라이드의 근거가 된 출처를 '파일명 p.숫자' 형식으로 정확히 적으십시오.
+12. 같은 type이 연속으로 두 번 나오지 않게 구성하십시오.
+13. type이 "개념"인 슬라이드는 전체의 절반을 넘기지 마십시오.
+14. 모든 내용은 한국어로 작성하십시오.
 
 [예시]
 아래는 다른 주제로 잘 작성된 슬라이드입니다. 형식과 밀도를 이 정도로 맞추십시오.
@@ -205,6 +210,29 @@ def _clean_diagram(raw):
     return {"kind": kind, "nodes": nodes, "edges": edges}
 
 
+MAX_STAT_VALUE = 6
+MAX_STAT_LABEL = 24
+
+
+def _clean_stat(raw):
+    """대표 수치를 검사한다. 조건에 맞지 않으면 None.
+
+    숫자가 한 글자도 없으면 수치가 아니라 낱말이므로 거절한다.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    value = str(raw.get("value", "")).strip()
+    label = str(raw.get("label", "")).strip()
+
+    if not value or len(value) > MAX_STAT_VALUE:
+        return None
+    if not any(ch.isdigit() for ch in value):
+        return None
+
+    return {"value": value, "label": label[:MAX_STAT_LABEL]}
+
+
 def _parse_json(raw):
     """LLM 응답에서 JSON 배열을 꺼낸다.
 
@@ -241,6 +269,7 @@ def _parse_json(raw):
             "bullets": [str(b).strip() for b in item.get("bullets", []) if str(b).strip()],
             "code": code,
             "diagram": _clean_diagram(item.get("diagram")),
+            "stat": _clean_stat(item.get("stat")),
             "source": str(item.get("source", "")).strip(),
         })
 
@@ -664,21 +693,40 @@ def _rect(slide, left, top, width, height, fill,
     return shp
 
 
-def _blank(prs):
-    return prs.slides.add_slide(prs.slide_layouts[6])
+def _blank(prs, dark=False):
+    """빈 슬라이드. dark면 배경을 남색으로 깔아 강조면으로 쓴다.
+
+    본문이 전부 흰 배경이면 넘길수록 같은 화면이 반복되는 인상을 준다.
+    몇 장에 한 번 배경을 뒤집어 읽는 흐름에 마디를 만든다.
+    """
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    if dark:
+        _rect(slide, 0, 0, SLIDE_W, SLIDE_H, NAVY_DARK, shape=MSO_SHAPE.RECTANGLE)
+        _rect(slide, 10.6, -1.6, 4.6, 4.6, NAVY_MID, shape=MSO_SHAPE.OVAL)
+    return slide
 
 
-def _header(slide, index, title, lead):
+# 배경을 뒤집을 슬라이드 간격. 3장에 한 번씩 강조면이 온다.
+ACCENT_EVERY = 3
+
+
+def _is_accent(index):
+    return index % ACCENT_EVERY == 0
+
+
+def _header(slide, index, title, lead, dark=False):
     """모든 본문 슬라이드 상단에 공통으로 들어가는 제목 영역"""
     _text(slide, 0.62, 0.42, 3, 0.28, f"{index:02d}", size=11, bold=True, color=AMBER)
-    _text(slide, 0.62, 0.72, 11.5, 0.62, title, size=25, bold=True, color=NAVY)
+    _text(slide, 0.62, 0.72, 11.5, 0.62, title, size=25, bold=True,
+          color=WHITE if dark else NAVY)
 
     if lead:
-        bar = _rect(slide, 0.62, 1.5, 12.1, 0.62, ICE_LIGHT, shape=MSO_SHAPE.RECTANGLE)
+        bar = _rect(slide, 0.62, 1.5, 12.1, 0.62,
+                    NAVY_MID if dark else ICE_LIGHT, shape=MSO_SHAPE.RECTANGLE)
         bar.line.fill.background()
         _rect(slide, 0.62, 1.5, 0.05, 0.62, AMBER, shape=MSO_SHAPE.RECTANGLE)
         _text(slide, 0.85, 1.5, 11.7, 0.62, lead, size=13, bold=True,
-              color=NAVY, anchor=MSO_ANCHOR.MIDDLE)
+              color=ICE if dark else NAVY, anchor=MSO_ANCHOR.MIDDLE)
 
 
 # ============================================================
@@ -1082,7 +1130,7 @@ def _step_slide(prs, index, data):
 
         # 번호를 원으로 크게 표시해 순서를 드러낸다.
         circle = _rect(slide, 0.62, top + (card_h - 0.62) / 2, 0.62, 0.62,
-                       NAVY, shape=MSO_SHAPE.OVAL)
+                       AMBER, shape=MSO_SHAPE.OVAL)
         frame = circle.text_frame
         frame.vertical_anchor = MSO_ANCHOR.MIDDLE
         p = frame.paragraphs[0]
@@ -1107,70 +1155,114 @@ def _step_slide(prs, index, data):
     _footer(slide, data["source"])
 
 
-def _card_slide(prs, index, data):
-    """그림이 없을 때 — 본문을 카드 격자로 배치해 여백을 채운다."""
-    slide = _blank(prs)
-    _header(slide, index, data["title"], data["lead"])
+def _card(slide, x, y, w, h, number, text, size=13,
+          dark=False, invert=False):
+    """카드 한 장.
+
+    invert면 남색으로 채워 한 장만 도드라지게 한다.
+    카드 한쪽 모서리에 색 띠를 두르는 방식은 쓰지 않는다.
+    같은 장식이 모든 카드에 반복되면 눈에 띄지 않고 인쇄물 같은 인상만 남는다.
+    """
+    if invert:
+        fill, border, ink = NAVY, None, WHITE
+    elif dark:
+        fill, border, ink = NAVY_MID, None, WHITE
+    else:
+        fill, border, ink = WHITE, LINE, TEXT
+
+    _rect(slide, x, y, w, h, fill, line=border)
+    _badge(slide, x + 0.3, y + 0.3, number)
+    _text(slide, x + 0.3, y + 0.95, w - 0.6, h - 1.25, text,
+          size=size, color=ink, spacing=1.35)
+
+
+def _card_slide(prs, index, data, accent=False):
+    """그림이 없을 때 — 본문을 카드로 배치한다.
+
+    항목 수에 따라 배치를 바꾼다. 개수와 무관하게 한 가지 격자만 쓰면
+    두 개짜리 슬라이드는 휑하고 네 개짜리는 빽빽해진다.
+      2개  좌우로 나란히 놓아 대비시킨다
+      3개  가로 3열. 가운데 한 장을 뒤집어 시선을 잡는다
+      4개  2열 격자
+    """
+    slide = _blank(prs, dark=accent)
+    _header(slide, index, data["title"], data["lead"], dark=accent)
 
     bullets = data["bullets"][:4]
     if not bullets:
         return
 
     # 본문에 쓸 수 있는 세로 구간 (머리말 아래 ~ 출처 위)
-    area_top, area_bottom = 2.45, 6.6
+    area_top, area_bottom = 2.4, 6.6
+    span = area_bottom - area_top
+    n = len(bullets)
 
-    if len(bullets) <= 2:
-        # 가로로 넓은 카드. 개수가 적으면 세로 가운데로 모아 여백을 줄인다.
-        card_h, gap = 1.5, 0.3
-        total = len(bullets) * card_h + (len(bullets) - 1) * gap
-        top = area_top + (area_bottom - area_top - total) / 2
+    # 카드 높이는 글이 차지할 만큼만 준다.
+    # 남는 공간을 카드로 늘리면 글 아래가 텅 빈 채로 커 보인다.
+    if n == 1:
+        h = 1.9
+        _card(slide, 0.62, area_top + (span - h) / 2, 12.1, h,
+              1, bullets[0], size=16, dark=accent)
 
-        for i, bullet in enumerate(bullets, start=1):
-            _rect(slide, 0.62, top, 12.1, card_h, WHITE, line=LINE)
-            _rect(slide, 0.62, top, 0.06, card_h, NAVY, shape=MSO_SHAPE.RECTANGLE)
-            _badge(slide, 0.95, top + (card_h - 0.42) / 2, i)
-            _text(slide, 1.75, top + 0.15, 10.6, card_h - 0.3, bullet, size=15,
-                  color=TEXT, anchor=MSO_ANCHOR.MIDDLE, spacing=1.3)
-            top += card_h + gap
+    elif n == 2:
+        # 좌우 대비. 세로로 쌓으면 두 항목의 관계가 드러나지 않는다.
+        w, gap, h = 5.87, 0.36, 2.2
+        top = area_top + (span - h) / 2
+        for i, bullet in enumerate(bullets):
+            _card(slide, 0.62 + i * (w + gap), top, w, h,
+                  i + 1, bullet, size=15, dark=accent)
 
-    elif len(bullets) == 3:
-        # 3개는 세로로 쌓는다. 2열로 하면 한 칸이 비어 균형이 깨진다.
-        card_h, gap = 1.1, 0.25
-        total = 3 * card_h + 2 * gap
-        top = area_top + (area_bottom - area_top - total) / 2
-
-        for i, bullet in enumerate(bullets, start=1):
-            _rect(slide, 0.62, top, 12.1, card_h, WHITE, line=LINE)
-            _rect(slide, 0.62, top, 0.06, card_h, AMBER if i % 2 == 0 else NAVY,
-                  shape=MSO_SHAPE.RECTANGLE)
-            _badge(slide, 0.95, top + (card_h - 0.42) / 2, i)
-            _text(slide, 1.75, top + 0.12, 10.6, card_h - 0.24, bullet, size=14,
-                  color=TEXT, anchor=MSO_ANCHOR.MIDDLE, spacing=1.3)
-            top += card_h + gap
+    elif n == 3:
+        # 가로 3열. 가운데만 남색으로 뒤집어 슬라이드에 중심을 만든다.
+        w, gap, h = 3.83, 0.3, 2.6
+        top = area_top + (span - h) / 2
+        for i, bullet in enumerate(bullets):
+            _card(slide, 0.62 + i * (w + gap), top, w, h,
+                  i + 1, bullet, size=13,
+                  dark=accent, invert=(i == 1 and not accent))
 
     else:
-        # 4개는 2열 격자
-        card_h = 1.85
-        gap_y = 0.3
-        row_top = area_top + (area_bottom - area_top - (2 * card_h + gap_y)) / 2
-        positions = [
-            (0.62, row_top), (6.85, row_top),
-            (0.62, row_top + card_h + gap_y), (6.85, row_top + card_h + gap_y),
-        ]
+        w, gap_x, gap_y, h = 5.87, 0.36, 0.3, 1.85
+        top = area_top + (span - (2 * h + gap_y)) / 2
         for i, bullet in enumerate(bullets):
-            x, y = positions[i]
-            _rect(slide, x, y, 5.87, card_h, WHITE, line=LINE)
-            _rect(slide, x, y, 0.06, card_h, AMBER if i % 2 else NAVY,
-                  shape=MSO_SHAPE.RECTANGLE)
-            _badge(slide, x + 0.33, y + 0.32, i + 1)
-            _text(slide, x + 0.33, y + 0.92, 5.2, 0.8, bullet, size=13,
-                  color=TEXT, spacing=1.3)
+            _card(slide, 0.62 + (i % 2) * (w + gap_x),
+                  top + (i // 2) * (h + gap_y), w, h,
+                  i + 1, bullet, size=13, dark=accent)
 
-    _footer(slide, data["source"])
+    _footer(slide, data["source"], dark=accent)
+
+
+def _stat_slide(prs, index, data, accent=False):
+    """핵심 수치가 있을 때 — 숫자를 크게 놓고 설명을 옆에 붙인다."""
+    stat = data["stat"]
+    slide = _blank(prs, dark=accent)
+    _header(slide, index, data["title"], data["lead"], dark=accent)
+
+    area_top, h = 2.4, 4.2
+
+    _rect(slide, 0.62, area_top, 5.5, h,
+          NAVY if not accent else NAVY_MID, line=None)
+    _rect(slide, 6.62, area_top + 0.9, 3.0, 0.04, AMBER,
+          shape=MSO_SHAPE.RECTANGLE)
+
+    _text(slide, 0.95, area_top + 1.0, 4.9, 1.5, stat["value"],
+          size=76, bold=True, color=AMBER, align=PP_ALIGN.CENTER)
+    _text(slide, 0.95, area_top + 2.6, 4.9, 0.9, stat["label"],
+          size=14, color=ICE, align=PP_ALIGN.CENTER, spacing=1.3)
+
+    bullets = data["bullets"][:3]
+    top = area_top + 1.3
+    for bullet in bullets:
+        _text(slide, 6.62, top, 6.1, 0.9, bullet, size=14,
+              color=WHITE if accent else TEXT, spacing=1.35)
+        top += 1.0
+
+    _footer(slide, data["source"], dark=accent)
 
 
 def _badge(slide, left, top, number):
-    circle = _rect(slide, left, top, 0.42, 0.42, NAVY, shape=MSO_SHAPE.OVAL)
+    """번호 원. 밝은 배경에서도 어두운 배경에서도 같은 앰버를 쓴다."""
+    circle = _rect(slide, left, top, 0.42, 0.42, AMBER, shape=MSO_SHAPE.OVAL)
     frame = circle.text_frame
     frame.vertical_anchor = MSO_ANCHOR.MIDDLE
     p = frame.paragraphs[0]
@@ -1183,11 +1275,13 @@ def _badge(slide, left, top, number):
     run.font.color.rgb = WHITE
 
 
-def _footer(slide, source):
+def _footer(slide, source, dark=False):
     if not source:
         return
-    _rect(slide, 0.62, 6.78, 12.1, 0.02, LINE, shape=MSO_SHAPE.RECTANGLE)
-    _text(slide, 0.62, 6.9, 12.1, 0.3, f"출처 · {source}", size=9, color=GRAY)
+    _rect(slide, 0.62, 6.78, 12.1, 0.02, NAVY_MID if dark else LINE,
+          shape=MSO_SHAPE.RECTANGLE)
+    _text(slide, 0.62, 6.9, 12.1, 0.3, f"출처 · {source}", size=9,
+          color=ICE if dark else GRAY)
 
 
 def _closing_slide(prs, topic):
@@ -1312,6 +1406,10 @@ def build_pptx(topic, slides, pdf_store=None, log=None,
         # 절차를 번호 없이 늘어놓으면 순서라는 사실이 사라진다.
         kind_of = data.get("type")
 
+        # 배경을 뒤집는 강조면. 그림이나 도식이 들어가는 슬라이드는 제외한다.
+        # 어두운 바탕에 흰 배경의 도표를 얹으면 그림만 떠 보인다.
+        accent = _is_accent(i)
+
         if kind_of == "코드" and data.get("code"):
             _code_slide(prs, i, data)
         elif kind_of == "비교":
@@ -1322,8 +1420,10 @@ def build_pptx(topic, slides, pdf_store=None, log=None,
             _image_slide(prs, i, data, image_bytes, kind)
         elif data.get("diagram"):
             _diagram_slide(prs, i, data)
+        elif data.get("stat"):
+            _stat_slide(prs, i, data, accent=accent)
         else:
-            _card_slide(prs, i, data)
+            _card_slide(prs, i, data, accent=accent)
 
     _closing_slide(prs, topic)
 
